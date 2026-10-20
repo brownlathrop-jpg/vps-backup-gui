@@ -209,6 +209,7 @@ class Broken(Exception):
 def gz_check(path, cancel=None):
     """Прочитать .gz до конца: проверяет CRC и что поток не оборван. Возвращает (ok, сообщение)."""
     try:
+        if Path(path).stat().st_size == 0: return False, f"{Path(path).name}: файл пустой"
         with gzip.open(path, "rb") as f:
             while f.read(1 << 20):
                 if cancel is not None and cancel.is_set(): raise Cancelled()
@@ -494,7 +495,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.8", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.9", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
@@ -1154,7 +1155,21 @@ class App(ctk.CTk):
                     err += ch.recv_stderr(65536); got = True
                 if got: idle = time.time()
                 else:
-                    if ch.exit_status_ready() and not ch.recv_ready() and not ch.recv_stderr_ready(): break
+                    if ch.exit_status_ready() and not ch.recv_ready() and not ch.recv_stderr_ready():
+                        # процесс завершён, но хвост потока может быть ещё в пути — дочитываем до EOF
+                        ch.settimeout(30)
+                        try:
+                            while True:
+                                d = ch.recv(262144)
+                                if not d: break
+                                f.write(d); done += len(d)
+                            while True:
+                                e = ch.recv_stderr(65536)
+                                if not e: break
+                                err += e
+                        except socket.timeout:
+                            raise ConnectionError("сервер не прислал конец данных")
+                        break
                     tr = ssh.get_transport()
                     if tr is None or not tr.is_active(): raise ConnectionError("SSH-соединение закрыто")
                     if ch.closed and not ch.recv_ready():
