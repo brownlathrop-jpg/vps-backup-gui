@@ -1,8 +1,9 @@
-#define AppVer GetEnv("APP_BUILD")
+#define AppVer GetEnv("APP_VERSION")
 
 [Setup]
 AppId={{8C4E2A71-5B3D-4F6A-9E21-VPSBACKUP0001}
 AppName=VPS Backup
+AppVerName=VPS Backup v{#AppVer}
 AppVersion={#AppVer}
 AppPublisher=VPS Backup
 DefaultDirName={localappdata}\Programs\VPSBackup
@@ -10,7 +11,7 @@ DefaultGroupName=VPS Backup
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 OutputDir=dist
-OutputBaseFilename=VPSBackup-Setup
+OutputBaseFilename=VPSBackup-Setup-v{#AppVer}
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\VPSBackup.exe
 Compression=lzma2
