@@ -1,5 +1,5 @@
 """VPS Backup — GUI-приложение для резервного копирования VPS на локальный ПК."""
-import json, os, queue, shlex, shutil, tarfile, threading, time, subprocess, sys
+import json, os, re, socket, queue, shlex, shutil, tarfile, threading, time, subprocess, sys
 from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -73,53 +73,120 @@ def parse_os(text):
 def gb(n): return f"{n/1073741824:.1f} ГБ"
 
 
+def safe_name(t):
+    t = re.sub(r'[\\/:*?"<>|\s]+', "_", (t or "").strip()).strip("._")
+    return t[:60] or "server"
+
+
+# Палитра в стиле Windows 11 (Fluent, светлая)
+BG, CARD, BORDER = "#F3F5F9", "#FFFFFF", "#E1E5EC"
+ACCENT, ACCENT_H = "#0067C0", "#1A7BD1"
+TXT, MUTED = "#1B1F24", "#5F6B7A"
+OK, WARN, ERR = "#0F7B0F", "#9D5D00", "#C42B1C"
+SOFT, SOFT_H = "#EEF1F6", "#E2E7EF"
+
+
+def card(master, title=None):
+    f = ctk.CTkFrame(master, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10)
+    if title:
+        ctk.CTkLabel(f, text=title, font=ctk.CTkFont(size=14, weight="bold"), text_color=TXT
+                     ).pack(anchor="w", padx=14, pady=(10, 2))
+    return f
+
+
+def btn(master, text, cmd, primary=True, **kw):
+    if primary:
+        return ctk.CTkButton(master, text=text, command=cmd, height=34, corner_radius=6, fg_color=ACCENT,
+                             hover_color=ACCENT_H, text_color="#FFFFFF", font=ctk.CTkFont(size=13, weight="bold"), **kw)
+    return ctk.CTkButton(master, text=text, command=cmd, height=34, corner_radius=6, fg_color=SOFT, hover_color=SOFT_H,
+                         text_color=TXT, border_color=BORDER, border_width=1, **kw)
+
+
+def entry(master, **kw):
+    return ctk.CTkEntry(master, height=32, corner_radius=6, fg_color="#FFFFFF", border_color=BORDER,
+                        text_color=TXT, **kw)
+
+
+def chk(master, text, var):
+    return ctk.CTkCheckBox(master, text=text, variable=var, text_color=TXT, fg_color=ACCENT, hover_color=ACCENT_H,
+                           border_color="#8A94A3", corner_radius=4, checkbox_width=20, checkbox_height=20)
+
+
 class ConnForm(ctk.CTkFrame):
-    """Блок полей подключения по SSH (используется на обеих вкладках)."""
-    def __init__(self, master, app):
-        super().__init__(master)
+    """Карточка подключения по SSH со списком сохранённых серверов."""
+    NEW = "+ Новый сервер"
+
+    def __init__(self, master, app, title):
+        super().__init__(master, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10)
         self.app = app
-        self.columnconfigure(1, weight=1); self.r = 0
-        self.host = self.row("IP / хост:", ctk.CTkEntry(self))
-        self.port = self.row("Порт:", ctk.CTkEntry(self)); self.port.insert(0, "22")
-        self.user = self.row("Пользователь:", ctk.CTkEntry(self)); self.user.insert(0, "root")
+        self.columnconfigure(1, weight=1)
+        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=14, weight="bold"), text_color=TXT
+                     ).grid(row=0, column=0, columnspan=3, sticky="w", padx=14, pady=(10, 4))
+        self.r = 1
+        pf = ctk.CTkFrame(self, fg_color="transparent")
+        self.prof = ctk.CTkComboBox(pf, values=[self.NEW], state="readonly", command=self._pick_profile, height=32,
+                                    corner_radius=6, border_color=BORDER, button_color=ACCENT,
+                                    button_hover_color=ACCENT_H, fg_color="#FFFFFF", text_color=TXT,
+                                    dropdown_fg_color="#FFFFFF", dropdown_text_color=TXT)
+        self.prof.pack(side="left", fill="x", expand=True); self.prof.set(self.NEW)
+        btn(pf, "💾 Сохранить", self._save_profile, width=110).pack(side="left", padx=(6, 0))
+        btn(pf, "🗑", self._del_profile, primary=False, width=40).pack(side="left", padx=(6, 0))
+        self.row("Сервер:", pf)
+        self.name = self.row("Название:", entry(self, placeholder_text="например: Магазин"))
+        self.host = self.row("IP / хост:", entry(self))
+        hp = ctk.CTkFrame(self, fg_color="transparent")
+        self.port = entry(hp, width=80); self.port.insert(0, "22"); self.port.pack(side="left")
+        ctk.CTkLabel(hp, text="Пользователь:", text_color=MUTED).pack(side="left", padx=(14, 6))
+        self.user = entry(hp); self.user.insert(0, "root"); self.user.pack(side="left", fill="x", expand=True)
+        self.row("Порт:", hp)
         self.auth = ctk.StringVar(value="password")
-        af = ctk.CTkFrame(self, fg_color="transparent")
-        ctk.CTkRadioButton(af, text="Пароль", variable=self.auth, value="password", command=self._auth).pack(side="left", padx=4)
-        ctk.CTkRadioButton(af, text="SSH-ключ", variable=self.auth, value="key", command=self._auth).pack(side="left", padx=4)
-        self.row("Авторизация:", af)
-        self.pwd = self.row("Пароль / passphrase:", ctk.CTkEntry(self, show="•"))
+        self.authsw = ctk.CTkSegmentedButton(self, values=["Пароль", "SSH-ключ"], command=self._auth_sw, height=30,
+                                             selected_color=ACCENT, selected_hover_color=ACCENT_H,
+                                             unselected_color=SOFT, unselected_hover_color=SOFT_H, text_color=TXT,
+                                             fg_color=SOFT)
+        self.authsw.set("Пароль"); self.row("Вход:", self.authsw, sticky="w")
+        self.pwd = self.row("Пароль / фраза:", entry(self, show="•"))
         kf = ctk.CTkFrame(self, fg_color="transparent")
-        self.key = ctk.CTkEntry(kf); self.key.pack(side="left", fill="x", expand=True)
-        self.keybtn = ctk.CTkButton(kf, text="…", width=40, command=self._pick_key); self.keybtn.pack(side="left", padx=4)
+        self.key = entry(kf); self.key.pack(side="left", fill="x", expand=True)
+        self.keybtn = btn(kf, "Обзор", self._pick_key, primary=False, width=70); self.keybtn.pack(side="left", padx=(6, 0))
         self.row("Файл ключа:", kf)
+        self.r += 1; ctk.CTkFrame(self, height=6, fg_color="transparent").grid(row=self.r, column=0)
         self._auth()
 
-    def row(self, label, w):
-        ctk.CTkLabel(self, text=label).grid(row=self.r, column=0, sticky="w", padx=8, pady=3)
-        w.grid(row=self.r, column=1, columnspan=2, sticky="ew", padx=8, pady=3); self.r += 1
+    def row(self, label, w, sticky="ew"):
+        ctk.CTkLabel(self, text=label, text_color=MUTED).grid(row=self.r, column=0, sticky="w", padx=(14, 8), pady=3)
+        w.grid(row=self.r, column=1, columnspan=2, sticky=sticky, padx=(0, 14), pady=3); self.r += 1
         return w
+
+    def _auth_sw(self, v):
+        self.auth.set("key" if v == "SSH-ключ" else "password"); self._auth()
 
     def _auth(self):
         k = self.auth.get() == "key"
+        self.authsw.set("SSH-ключ" if k else "Пароль")
         self.key.configure(state="normal" if k else "disabled"); self.keybtn.configure(state="normal" if k else "disabled")
 
     def _pick_key(self):
         p = filedialog.askopenfilename(title="SSH-ключ")
         if p: self.key.delete(0, "end"); self.key.insert(0, p)
 
-    def kr_id(self): return f"{self.user.get()}@{self.host.get()}:{self.port.get()}"
+    def kr_id(self): return f"{self.user.get().strip()}@{self.host.get().strip()}:{self.port.get().strip()}"
+
+    def label(self): return self.name.get().strip() or self.host.get().strip()
 
     def cfg(self):
         return dict(host=self.host.get().strip(), port=int(self.port.get() or 22), user=self.user.get().strip(),
-                    auth=self.auth.get(), pwd=self.pwd.get(), key=self.key.get())
+                    auth=self.auth.get(), pwd=self.pwd.get(), key=self.key.get(), name=self.label())
 
     def dump(self):
-        if keyring and self.pwd.get():
+        if keyring and self.pwd.get() and self.host.get().strip():
             try: keyring.set_password(APP, self.kr_id(), self.pwd.get())
             except Exception as e: self.app.q.put(("log", f"[!] Не удалось сохранить пароль: {e}"))
-        return {"host": self.host.get(), "port": self.port.get(), "user": self.user.get(), "auth": self.auth.get(), "key": self.key.get()}
+        return {"name": self.name.get().strip(), "host": self.host.get().strip(), "port": self.port.get().strip(),
+                "user": self.user.get().strip(), "auth": self.auth.get(), "key": self.key.get()}
 
     def load(self, d):
+        self.name.delete(0, "end"); self.name.insert(0, d.get("name", ""))
         for w, k, dv in [(self.host, "host", ""), (self.port, "port", "22"), (self.user, "user", "root"), (self.key, "key", "")]:
             w.configure(state="normal"); w.delete(0, "end"); w.insert(0, d.get(k, dv))
         self.auth.set(d.get("auth", "password")); self.pwd.delete(0, "end")
@@ -130,6 +197,47 @@ class ConnForm(ctk.CTkFrame):
             except Exception: pass
         self._auth()
 
+    # ----- профили (общие для обеих вкладок) -----
+    def refresh(self):
+        names = sorted(self.app.servers, key=str.lower)
+        self.prof.configure(values=[self.NEW] + names)
+        cur = self.label()
+        self.prof.set(cur if cur in self.app.servers else self.NEW)
+
+    def _pick_profile(self, v):
+        if v == self.NEW:
+            self.load({}); self.name.focus()
+        else:
+            self.load(self.app.servers.get(v, {}))
+
+    def _save_profile(self):
+        if not self.host.get().strip(): return messagebox.showerror("Ошибка", "Укажите IP или хост сервера")
+        if not self.name.get().strip(): self.name.insert(0, self.host.get().strip())
+        d = self.dump(); old = self.prof.get()
+        if old not in (self.NEW, d["name"]) and old in self.app.servers and \
+                messagebox.askyesno("VPS Backup", f"Переименовать «{old}» в «{d['name']}»?"):
+            self.app.servers.pop(old, None)
+        self.app.servers[d["name"]] = d; self.app.save_servers()
+        self.app.q.put(("log", f"[+] Сервер «{d['name']}» сохранён в список"))
+
+    def _del_profile(self):
+        n = self.prof.get()
+        if n == self.NEW or n not in self.app.servers: return
+        if not messagebox.askyesno("VPS Backup", f"Удалить сервер «{n}» из списка?"): return
+        d = self.app.servers.pop(n)
+        if keyring:
+            try: keyring.delete_password(APP, f"{d.get('user')}@{d.get('host')}:{d.get('port')}")
+            except Exception: pass
+        self.app.save_servers(); self.load({})
+
+
+NET_ERRORS = (socket.error, socket.timeout, EOFError, ConnectionError, paramiko.SSHException)
+
+
+def net_msg(e):
+    return ("Связь с сервером прервана (сменилась сеть, отключился VPN или интернет). "
+            f"Недокачанный файл удалён — просто запустите заново. Подробности: {e or type(e).__name__}")
+
 
 def connect(c, L):
     ssh = paramiko.SSHClient(); ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -137,16 +245,22 @@ def connect(c, L):
     kw = dict(hostname=c["host"], port=c["port"], username=c["user"], timeout=20, allow_agent=False, look_for_keys=False)
     if c["auth"] == "key": kw.update(key_filename=c["key"], passphrase=c["pwd"] or None)
     else: kw["password"] = c["pwd"]
-    ssh.connect(**kw); ssh.get_transport().set_keepalive(30); L("[+] Подключено")
+    ssh.connect(**kw); ssh.get_transport().set_keepalive(10); L("[+] Подключено")
     return ssh
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        ctk.set_appearance_mode("dark")
+        ctk.set_appearance_mode("light")
         self.title("VPS Backup")
-        self.geometry("880x980")
+        self.geometry("920x1000"); self.minsize(820, 760)
+        self.configure(fg_color=BG)
+        try:
+            ico = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "icon.ico"
+            if ico.exists(): self.iconbitmap(str(ico))
+        except Exception: pass
+        self.servers = {}
         self.q = queue.Queue()
         self.busy = False
         self.cancel = threading.Event()
@@ -157,58 +271,76 @@ class App(ctk.CTk):
         self.after(100, self._poll)
 
     def _ui(self):
-        self.tabs = ctk.CTkTabview(self, height=560); self.tabs.pack(fill="x", padx=12, pady=(6, 0))
-        tb = self.tabs.add("Создать бэкап"); tr = self.tabs.add("Восстановить на сервер")
+        # ----- шапка -----
+        hd = ctk.CTkFrame(self, fg_color="transparent"); hd.pack(fill="x", padx=18, pady=(14, 4))
+        ctk.CTkLabel(hd, text="🛡  VPS Backup", font=ctk.CTkFont(size=22, weight="bold"), text_color=TXT).pack(side="left")
+        ctk.CTkLabel(hd, text=" v4 ", fg_color="#DCEBFA", text_color=ACCENT, corner_radius=8,
+                     font=ctk.CTkFont(size=11, weight="bold")).pack(side="left", padx=10)
+        ctk.CTkLabel(hd, text="Резервные копии серверов на ваш компьютер", text_color=MUTED).pack(side="right")
+
+        self.tabs = ctk.CTkTabview(self, height=600, fg_color=BG, segmented_button_fg_color=SOFT,
+                                   segmented_button_selected_color=ACCENT, segmented_button_selected_hover_color=ACCENT_H,
+                                   segmented_button_unselected_color=SOFT, segmented_button_unselected_hover_color=SOFT_H,
+                                   text_color=TXT, corner_radius=10)
+        self.tabs.pack(fill="x", padx=12)
+        tb = self.tabs.add("  Создать бэкап  "); tr = self.tabs.add("  Восстановить на сервер  ")
 
         # ----- вкладка бэкапа -----
-        self.conn = ConnForm(tb, self); self.conn.pack(fill="x")
-        df = ctk.CTkFrame(self.conn, fg_color="transparent")
-        self.dest = ctk.CTkEntry(df); self.dest.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(df, text="Обзор", width=70, command=self._pick_dir).pack(side="left", padx=4)
-        self.conn.row("Папка бэкапов:", df)
-        c = ctk.CTkFrame(tb); c.pack(fill="x", pady=6)
+        self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", pady=(0, 8))
+        c = card(tb, "Что сохранить"); c.pack(fill="x", pady=(0, 8))
+        g = ctk.CTkFrame(c, fg_color="transparent"); g.pack(fill="x", padx=12, pady=(2, 6))
+        g.columnconfigure((0, 1), weight=1)
         self.opt = {k: ctk.BooleanVar(value=True) for k in ("db", "web", "conf", "pkgs")}
-        for k, t in [("db", "Базы данных (автодамп MySQL / PostgreSQL)"), ("web", "Файлы сайтов (/var/www, /home)"),
-                     ("conf", "Конфигурации сервисов (/etc/nginx, /etc/apache2, cron, systemd…)"),
-                     ("pkgs", "Список установленных пакетов")]:
-            ctk.CTkCheckBox(c, text=t, variable=self.opt[k]).pack(anchor="w", padx=12, pady=2)
+        for i, (k, t) in enumerate([("db", "🗄  Базы данных (MySQL / PostgreSQL)"), ("web", "🌐  Файлы сайтов (/var/www, /home)"),
+                                    ("conf", "⚙  Настройки служб (nginx, cron…)"), ("pkgs", "📦  Список программ")]):
+            chk(g, t, self.opt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=5)
+        df = ctk.CTkFrame(c, fg_color="transparent"); df.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(df, text="Папка:", text_color=MUTED).pack(side="left", padx=(0, 8))
+        self.dest = entry(df); self.dest.pack(side="left", fill="x", expand=True)
+        btn(df, "Обзор", self._pick_dir, primary=False, width=70).pack(side="left", padx=(6, 0))
         b = ctk.CTkFrame(tb, fg_color="transparent"); b.pack(fill="x")
-        self.start = ctk.CTkButton(b, text="Начать бэкап", height=36, command=self.run); self.start.pack(side="left")
-        self.openb = ctk.CTkButton(b, text="Открыть папку с бэкапами", height=36, state="disabled", command=self.open_dir)
+        self.start = btn(b, "▶  Начать бэкап", self.run, width=180); self.start.pack(side="left")
+        self.openb = btn(b, "📂  Открыть папку с бэкапами", self.open_dir, primary=False, state="disabled")
         self.openb.pack(side="left", padx=8)
 
         # ----- вкладка восстановления -----
-        af = ctk.CTkFrame(tr); af.pack(fill="x")
-        ctk.CTkLabel(af, text="Файл бэкапа:").pack(side="left", padx=8, pady=6)
-        self.arch = ctk.CTkEntry(af); self.arch.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(af, text="Обзор", width=70, command=self._pick_archive).pack(side="left", padx=8)
-        self.oslbl = ctk.CTkLabel(tr, text="ОС в архиве: — выберите файл бэкапа", font=ctk.CTkFont(weight="bold"),
-                                  text_color="#7fb8ff"); self.oslbl.pack(anchor="w", padx=8, pady=(4, 2))
-        ctk.CTkLabel(tr, text="Новый сервер (куда разворачивать):").pack(anchor="w", padx=8)
-        self.rconn = ConnForm(tr, self); self.rconn.pack(fill="x")
-        rc = ctk.CTkFrame(tr); rc.pack(fill="x", pady=6)
+        af = card(tr, "Файл бэкапа"); af.pack(fill="x", pady=(0, 8))
+        r = ctk.CTkFrame(af, fg_color="transparent"); r.pack(fill="x", padx=14, pady=(2, 6))
+        self.arch = entry(r); self.arch.pack(side="left", fill="x", expand=True)
+        btn(r, "Обзор", self._pick_archive, primary=False, width=70).pack(side="left", padx=(6, 0))
+        self.oslbl = ctk.CTkLabel(af, text="Выберите файл — программа покажет, с какого он сервера", justify="left",
+                                  anchor="w", text_color=MUTED, fg_color=SOFT, corner_radius=8)
+        self.oslbl.pack(fill="x", padx=14, pady=(0, 12), ipady=8, ipadx=8)
+        self.rconn = ConnForm(tr, self, "Новый сервер (куда разворачивать)"); self.rconn.pack(fill="x", pady=(0, 8))
+        rc = card(tr, "Что восстановить"); rc.pack(fill="x", pady=(0, 8))
         self.ropt = {k: ctk.BooleanVar(value=v) for k, v in (("clp", False), ("web", True), ("conf", True), ("db", True))}
-        for k, t in [("clp", "Чистый сервер: сначала установить CloudPanel (Nginx, MySQL, PHP) автоматически"),
-                     ("web", "Восстановить файлы сайтов (/var/www, /home)"),
-                     ("conf", "Восстановить конфигурации сервисов (/etc/...)"),
-                     ("db", "Восстановить базы данных (MySQL / PostgreSQL)")]:
-            ctk.CTkCheckBox(rc, text=t, variable=self.ropt[k]).pack(anchor="w", padx=12, pady=2)
+        for k, t in [("clp", "🧩  Чистый сервер: сначала установить CloudPanel (Nginx, MySQL, PHP)"),
+                     ("web", "🌐  Файлы сайтов (/var/www, /home)"),
+                     ("conf", "⚙  Настройки служб (/etc/...)"),
+                     ("db", "🗄  Базы данных (MySQL / PostgreSQL)")]:
+            chk(rc, t, self.ropt[k]).pack(anchor="w", padx=16, pady=4)
+        ctk.CTkFrame(rc, height=6, fg_color="transparent").pack()
         rb = ctk.CTkFrame(tr, fg_color="transparent"); rb.pack(fill="x")
-        self.checkb = ctk.CTkButton(rb, text="Проверить сервер", height=36, command=lambda: self.restore(check_only=True))
+        self.checkb = btn(rb, "🔍  Проверить сервер", lambda: self.restore(check_only=True), primary=False)
         self.checkb.pack(side="left")
-        self.rstart = ctk.CTkButton(rb, text="Начать восстановление", height=36, command=self.restore)
-        self.rstart.pack(side="left", padx=8)
+        self.rstart = btn(rb, "▶  Начать восстановление", self.restore, width=200); self.rstart.pack(side="left", padx=8)
 
         # ----- общая нижняя часть -----
-        bot = ctk.CTkFrame(self, fg_color="transparent"); bot.pack(fill="x", padx=12, pady=6)
-        self.stopb = ctk.CTkButton(bot, text="Остановить", height=34, state="disabled", fg_color="#a33", hover_color="#c44",
-                                   command=self.stop); self.stopb.pack(side="left")
-        self.status = ctk.CTkLabel(bot, text=""); self.status.pack(side="right")
+        bot = card(self); bot.pack(fill="both", expand=True, padx=12, pady=(6, 12))
+        top = ctk.CTkFrame(bot, fg_color="transparent"); top.pack(fill="x", padx=12, pady=(10, 4))
+        self.stopb = ctk.CTkButton(top, text="■  Остановить", height=32, corner_radius=6, state="disabled",
+                                   fg_color=ERR, hover_color="#A52314", text_color="#FFFFFF", command=self.stop)
+        self.stopb.pack(side="left")
         self.remember = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(bot, text="Запомнить настройки (пароли — в защищённом хранилище Windows)",
-                        variable=self.remember).pack(side="left", padx=12)
-        self.bar = ctk.CTkProgressBar(self); self.bar.pack(fill="x", padx=12); self.bar.set(0)
-        self.log = ctk.CTkTextbox(self, font=("Consolas", 12)); self.log.pack(fill="both", expand=True, padx=12, pady=10)
+        chk(top, "Запоминать настройки (пароли — в защищённом хранилище Windows)", self.remember).pack(side="left", padx=12)
+        self.status = ctk.CTkLabel(top, text="Готов к работе", text_color=MUTED); self.status.pack(side="right")
+        self.bar = ctk.CTkProgressBar(bot, height=8, corner_radius=4, progress_color=ACCENT, fg_color=SOFT)
+        self.bar.pack(fill="x", padx=12, pady=4); self.bar.set(0)
+        self.log = ctk.CTkTextbox(bot, font=("Consolas", 12), fg_color="#FAFBFD", text_color=TXT, border_color=BORDER,
+                                  border_width=1, corner_radius=8)
+        self.log.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+        for tag, col in (("ok", OK), ("warn", WARN), ("err", ERR), ("info", ACCENT)):
+            self.log.tag_config(tag, foreground=col)
 
     def _pick_dir(self):
         p = filedialog.askdirectory()
@@ -221,19 +353,34 @@ class App(ctk.CTk):
             self.arch.delete(0, "end"); self.arch.insert(0, p); self._read_os(p)
 
     def _read_os(self, p):
-        self.archive_os = None
+        self.archive_os = None; meta = {}
         try:
             with tarfile.open(p, "r|gz") as t:
-                m = next(iter(t), None)
-                if m and m.name.endswith("/os_release.txt"):
-                    self.archive_os = parse_os(t.extractfile(m).read().decode("utf-8", "replace"))
+                for i, m in enumerate(t):
+                    if i > 3: break
+                    if m.name.endswith("/backup_meta.json"):
+                        meta = json.loads(t.extractfile(m).read().decode("utf-8", "replace"))
+                    elif m.name.endswith("/os_release.txt"):
+                        self.archive_os = parse_os(t.extractfile(m).read().decode("utf-8", "replace"))
         except Exception as e:
-            self.oslbl.configure(text=f"Не удалось прочитать архив: {e}", text_color="#ff7f7f"); return
+            self.oslbl.configure(text=f"Не удалось прочитать архив: {e}", text_color=ERR); return
+        if not self.archive_os and meta.get("os"):
+            self.archive_os = (meta["os"], meta.get("os_id", ""), meta.get("os_version", ""))
+        lines = []
+        if meta:
+            src = meta.get("server_name") or meta.get("host", "?")
+            if meta.get("host") and meta.get("host") != src: src += f"  ({meta['host']})"
+            lines.append(f"🖥  Сервер-источник:  {src}")
+            if meta.get("hostname"): lines.append(f"🏷  Имя машины:  {meta['hostname']}")
+            if meta.get("created"): lines.append(f"📅  Создан:  {meta['created']}")
         if self.archive_os:
-            self.oslbl.configure(text=f"ОС в архиве: {self.archive_os[0]}  — закажите новый VPS с этой же системой",
-                                 text_color="#7fff9f")
+            lines.append(f"🐧  ОС:  {self.archive_os[0]}  — закажите новый VPS с этой же системой")
+        if meta.get("contents"): lines.append("📦  Содержимое:  " + ", ".join(meta["contents"]))
+        if lines:
+            self.oslbl.configure(text="\n".join(lines), text_color=OK if meta else TXT)
         else:
-            self.oslbl.configure(text="ОС в архиве: не указана (бэкап сделан старой версией программы)", text_color="#ffd27f")
+            self.oslbl.configure(text="Сведения о сервере не найдены (бэкап сделан старой версией программы)",
+                                 text_color=WARN)
 
     def open_dir(self):
         d = self.dest.get()
@@ -241,16 +388,26 @@ class App(ctk.CTk):
         else: subprocess.Popen(["xdg-open", d])
 
     # ---------- settings ----------
+    def save_servers(self):
+        self.save(); self.conn.refresh(); self.rconn.refresh()
+
     def save(self):
         CFG_DIR.mkdir(parents=True, exist_ok=True)
         data = self.conn.dump()
-        data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump())
+        data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump(),
+                    servers=self.servers)
         CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self):
         try: d = json.loads(CFG_FILE.read_text(encoding="utf-8"))
         except Exception: d = {}
+        self.servers = d.get("servers", {}) or {}
+        if not self.servers and d.get("host"):   # перенос старых настроек в список
+            n = d.get("name") or d["host"]
+            self.servers[n] = {k: d.get(k, "") for k in ("host", "port", "user", "auth", "key")} | {"name": n}
+            d["name"] = n
         self.conn.load(d); self.rconn.load(d.get("restore", {}))
+        self.conn.refresh(); self.rconn.refresh()
         self.dest.delete(0, "end"); self.dest.insert(0, d.get("dest", str(Path.home() / "VPS_Backups")))
         for k, v in d.get("opt", {}).items():
             if k in self.opt: self.opt[k].set(v)
@@ -291,6 +448,7 @@ class App(ctk.CTk):
         ch = ssh.get_transport().open_session(); self.chan = ch
         ch.exec_command("bash -c " + shlex.quote(cmd))
         done, t0, last, err = 0, time.time(), 0, b""
+        idle = time.time()
         with open(path, "wb") as f:
             while True:
                 if self.cancel.is_set(): ch.close(); raise Cancelled()
@@ -300,9 +458,14 @@ class App(ctk.CTk):
                     if d: f.write(d); done += len(d); got = True
                 if ch.recv_stderr_ready():
                     err += ch.recv_stderr(65536); got = True
-                if not got:
+                if got: idle = time.time()
+                else:
                     if ch.exit_status_ready() and not ch.recv_ready() and not ch.recv_stderr_ready(): break
-                    if ch.closed and not ch.recv_ready(): break
+                    tr = ssh.get_transport()
+                    if tr is None or not tr.is_active(): raise ConnectionError("SSH-соединение закрыто")
+                    if ch.closed and not ch.recv_ready():
+                        raise ConnectionError("канал закрыт до завершения команды")
+                    if time.time() - idle > 180: raise ConnectionError("сервер не отвечает 3 минуты")
                     time.sleep(0.02)
                 if time.time() - last > 0.3:
                     last = time.time(); sp = done / max(last - t0, 0.1) / 1048576
@@ -318,11 +481,23 @@ class App(ctk.CTk):
             Path(c["dest"]).mkdir(parents=True, exist_ok=True)
             ssh = connect(c, L); self.q.put(("bar", 0.05))
             _, o, _ = ssh.exec_command("hostname"); hn = o.read().decode().strip() or c["host"]
-            name = f"vps_backup_{hn}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+            name = f"vps_backup_{safe_name(c.get('name') or hn)}_{time.strftime('%Y-%m-%d_%H-%M')}"
+            final = Path(c["dest"]) / (name + ".tar.gz"); n = 2
+            while final.exists() or (Path(c["dest"]) / (name + ".part")).exists():
+                name = name.rstrip("_0123456789") if n > 2 else name
+                name = f"vps_backup_{safe_name(c.get('name') or hn)}_{time.strftime('%Y-%m-%d_%H-%M')}_{n}"
+                final = Path(c["dest"]) / (name + ".tar.gz"); n += 1
+            final = None
             tmp = Path(c["dest"]) / (name + ".part"); tmp.mkdir()
-            out, _ = self._exec(ssh, OS_CMD)
+            out, _ = self._exec(ssh, OS_CMD); osi = parse_os(out)
             (tmp / "os_release.txt").write_text(out, encoding="utf-8")
-            L(f"[i] ОС сервера: {parse_os(out)[0]}")
+            L(f"[i] Сервер: {c.get('name') or c['host']}  •  ОС: {osi[0]}")
+            names = {"db": "базы данных", "web": "файлы сайтов", "conf": "настройки служб", "pkgs": "список программ"}
+            meta = dict(format=1, app="VPS Backup v4", server_name=c.get("name") or c["host"], host=c["host"],
+                        port=c["port"], user=c["user"], hostname=hn, created=time.strftime("%d.%m.%Y %H:%M"),
+                        os=osi[0], os_id=osi[1], os_version=osi[2],
+                        contents=[v for k, v in names.items() if c["opt"].get(k)])
+            (tmp / "backup_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
             L("[*] Режим «на лету»: на диске сервера ничего не создаётся")
             errors = []
             o = c["opt"]
@@ -361,8 +536,9 @@ class App(ctk.CTk):
             if errors: (tmp / "errors.log").write_text("\n\n".join(errors), encoding="utf-8")
             self.q.put(("bar", 0.95)); L("[*] Упаковка в один файл...")
             final = Path(c["dest"]) / (name + ".tar.gz")
-            # os_release.txt кладём первым — так программа быстро читает ОС из архива
-            items = sorted(tmp.iterdir(), key=lambda p: (p.name != "os_release.txt", p.name))
+            # паспорт и ОС кладём первыми — так программа быстро читает ОС из архива
+            first = {"backup_meta.json": 0, "os_release.txt": 1}
+            items = sorted(tmp.iterdir(), key=lambda p: (first.get(p.name, 2), p.name))
             with tarfile.open(final, "w:gz", compresslevel=1) as t:
                 for p in items:
                     if self.cancel.is_set(): raise Cancelled()
@@ -377,7 +553,11 @@ class App(ctk.CTk):
                 except Exception: pass
             self.q.put(("bar", 0)); self.q.put(("done", ("backup", None)))
         except Exception as e:
+            if final and final.exists():
+                try: final.unlink()
+                except Exception: pass
             if self.cancel.is_set(): L("[■] Бэкап остановлен пользователем."); self.q.put(("done", ("backup", None)))
+            elif isinstance(e, NET_ERRORS): L(f"[✗] {net_msg(e)}"); self.q.put(("done", ("backup", False)))
             else: L(f"[✗] ОШИБКА: {e}"); self.q.put(("done", ("backup", False)))
         finally:
             if tmp: shutil.rmtree(tmp, ignore_errors=True)
@@ -522,6 +702,9 @@ class App(ctk.CTk):
             self.q.put(("bar", 0)); self.q.put(("done", ("restore", None)))
         except Exception as e:
             if self.cancel.is_set(): L("[■] Остановлено пользователем."); self.q.put(("done", ("restore", None)))
+            elif isinstance(e, NET_ERRORS):
+                L("[✗] Связь с сервером прервана (сменилась сеть / VPN). Часть данных могла записаться — "
+                  f"запустите восстановление заново. Подробности: {e}"); self.q.put(("done", ("restore", False)))
             else: L(f"[✗] ОШИБКА: {e}"); self.q.put(("done", ("restore", False)))
         finally:
             self.chan = None
@@ -531,7 +714,9 @@ class App(ctk.CTk):
         try:
             while True:
                 k, v = self.q.get_nowait()
-                if k == "log": self.log.insert("end", v + "\n"); self.log.see("end")
+                if k == "log":
+                    tag = {"[✓": "ok", "[+": "ok", "[!": "warn", "[■": "warn", "[✗": "err", "[i": "info"}.get(v[:2])
+                    self.log.insert("end", v + "\n", tag); self.log.see("end")
                 elif k == "bar": self.bar.set(v)
                 elif k == "status": self.status.configure(text=v)
                 elif k == "done":
