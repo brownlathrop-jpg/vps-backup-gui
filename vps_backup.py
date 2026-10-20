@@ -355,6 +355,8 @@ class ConnForm(ctk.CTkFrame):
         if old not in (self.NEW, d["name"]) and old in self.app.servers and \
                 messagebox.askyesno("VPS Backup", f"Переименовать «{old}» в «{d['name']}»?"):
             self.app.servers.pop(old, None)
+        prev = self.app.servers.get(old) or self.app.servers.get(d["name"]) or {}
+        d["note"] = prev.get("note", ""); d["added"] = prev.get("added") or time.strftime("%Y-%m-%d")
         self.app.servers[d["name"]] = d; self.app.save_servers()
         self.app.q.put(("log", f"[+] Сервер «{d['name']}» сохранён в список"))
 
@@ -422,7 +424,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.4", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.5", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
@@ -430,7 +432,8 @@ class App(ctk.CTk):
         self.page_sub.pack(anchor="w", padx=28, pady=(0, 4))
         host = ctk.CTkFrame(main, fg_color="transparent"); host.pack(fill="both", expand=True, padx=16)
         self.pages, self.navb = {}, {}
-        pages = [("backup", "💾   Создать бэкап", "Резервная копия сервера на ваш компьютер"),
+        pages = [("servers", "🖥   Мои серверы", "Все сохранённые серверы: что это за сервер, когда был последний бэкап"),
+                 ("backup", "💾   Создать бэкап", "Резервная копия сервера на ваш компьютер"),
                  ("restore", "🚀   Восстановление", "Развернуть бэкап на другом сервере — безопасно"),
                  ("sched", "⏰   Расписание", "Автоматические бэкапы в заданное время"),
                  ("cloud", "☁   Облако", "Копия бэкапа в Яндекс Диск или Облако Mail.ru — настраивается один раз")]
@@ -448,6 +451,7 @@ class App(ctk.CTk):
         self._main = main
         self._sched_ui(ts)
         self._cloud_ui(self.pages["cloud"][0])
+        self._srv_ui(self.pages["servers"][0])
 
         # ----- вкладка бэкапа -----
         self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", padx=12, pady=(0, 8))
@@ -521,7 +525,83 @@ class App(ctk.CTk):
                                    text_color=SIDE_T if k == key else SIDE_M)
         pg, t, sub = self.pages[key]
         pg.pack(fill="both", expand=True)
+        if key == "servers": self._srv_fill()
         self.page_title.configure(text=t); self.page_sub.configure(text=sub)
+
+    # ----- страница «Мои серверы» -----
+    def _srv_ui(self, pg):
+        top = ctk.CTkFrame(pg, fg_color="transparent"); top.pack(fill="x", padx=12, pady=(0, 8))
+        btn(top, "＋  Добавить сервер", self._srv_new, width=180).pack(side="left")
+        self.srv_count = ctk.CTkLabel(top, text="", text_color=MUTED); self.srv_count.pack(side="left", padx=12)
+        self.srv_list = ctk.CTkFrame(pg, fg_color="transparent"); self.srv_list.pack(fill="x")
+
+    def _srv_new(self):
+        self.conn.prof.set(ConnForm.NEW); self.conn.load({}); self.show("backup"); self.conn.name.focus()
+
+    def _srv_stats(self, n):
+        """Бэкапы этого сервера в папке на компьютере: (последний, количество, общий размер)."""
+        try:
+            d = Path(self.dest.get().strip() or ".")
+            fs = sorted(d.glob(f"vps_backup_{safe_name(n)}_*.tar.gz"), key=lambda p: p.stat().st_mtime)
+        except Exception: return None, 0, 0
+        return (fs[-1] if fs else None), len(fs), sum(p.stat().st_size for p in fs)
+
+    def _srv_note(self, n, tb):
+        if n in self.servers:
+            self.servers[n]["note"] = tb.get("1.0", "end").strip(); self.save()
+
+    def _srv_use(self, n, where):
+        f = self.conn if where == "backup" else self.rconn
+        f.prof.set(n); f.load(self.servers.get(n, {})); self.show(where)
+
+    def _srv_del(self, n):
+        self.conn.prof.set(n); self.conn._del_profile()
+
+    def _srv_fill(self):
+        for w in self.srv_list.winfo_children(): w.destroy()
+        names = sorted(self.servers, key=str.lower)
+        self.srv_count.configure(text=f"Серверов в списке: {len(names)}")
+        if not names:
+            c = card(self.srv_list, "Список пуст"); c.pack(fill="x", padx=12, pady=(0, 8))
+            ctk.CTkLabel(c, text="Нажмите «Добавить сервер», заполните подключение и нажмите «💾 Сохранить».",
+                         text_color=MUTED).pack(anchor="w", padx=16, pady=(0, 12))
+            return
+        for n in names:
+            d = self.servers[n]
+            c = ctk.CTkFrame(self.srv_list, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=14)
+            c.pack(fill="x", padx=12, pady=(0, 8)); c.columnconfigure(1, weight=1)
+            ctk.CTkLabel(c, text="🖥", font=ctk.CTkFont(FONT, 22), width=44, height=44, fg_color=SOFT,
+                         corner_radius=10).grid(row=0, column=0, rowspan=3, sticky="n", padx=(14, 12), pady=12)
+            ctk.CTkLabel(c, text=n, font=ctk.CTkFont(FONT, 15, "bold"), text_color=TXT
+                         ).grid(row=0, column=1, sticky="w", pady=(10, 0))
+            auth = "по ключу" if d.get("auth") == "key" else "по паролю"
+            last, cnt, size = self._srv_stats(n)
+            info = f"{d.get('user', 'root')}@{d.get('host', '')}:{d.get('port', '22')}   ·   вход {auth}"
+            if d.get("added"): info += f"   ·   добавлен {d['added']}"
+            ctk.CTkLabel(c, text=info, text_color=MUTED).grid(row=1, column=1, sticky="w")
+            if last:
+                bt, col = (f"✔ Последний бэкап: {time.strftime('%d.%m.%Y %H:%M', time.localtime(last.stat().st_mtime))}"
+                           f"   ·   копий в папке: {cnt} ({size/1073741824:.1f} ГБ)" if size >= 107374182 else f"   ·   копий в папке: {cnt} ({size/1048576:.0f} МБ)"), OK
+            else: bt, col = "Бэкапов в папке пока нет", WARN
+            ctk.CTkLabel(c, text=bt, text_color=col).grid(row=2, column=1, sticky="w")
+            tb = ctk.CTkTextbox(c, height=46, fg_color="#FAFBFE", border_color=BORDER, border_width=1,
+                                corner_radius=8, text_color=TXT, font=ctk.CTkFont(FONT, 12), wrap="word")
+            tb.grid(row=3, column=1, sticky="ew", pady=(6, 4))
+            if d.get("note"): tb.insert("1.0", d["note"])
+            else:
+                ph = "Комментарий: что это за сервер (например: интернет-магазин, Timeweb)"
+                tb.insert("1.0", ph); tb.configure(text_color=MUTED)
+                def _clr(e, tb=tb, ph=ph):
+                    if tb.get("1.0", "end").strip() == ph: tb.delete("1.0", "end"); tb.configure(text_color=TXT)
+                tb.bind("<FocusIn>", _clr)
+                tb.bind("<FocusOut>", lambda e, n=n, tb=tb, ph=ph:
+                        None if tb.get("1.0", "end").strip() in ("", ph) else self._srv_note(n, tb))
+            if d.get("note"): tb.bind("<FocusOut>", lambda e, n=n, tb=tb: self._srv_note(n, tb))
+            b = ctk.CTkFrame(c, fg_color="transparent"); b.grid(row=0, column=2, rowspan=4, sticky="ne", padx=14, pady=12)
+            btn(b, "💾  Бэкап", lambda n=n: self._srv_use(n, "backup"), width=170).pack(pady=(0, 6))
+            btn(b, "🚀  Восстановить сюда", lambda n=n: self._srv_use(n, "restore"), primary=False, width=170).pack(pady=(0, 6))
+            btn(b, "🗑  Удалить", lambda n=n: self._srv_del(n), primary=False, width=170).pack()
+            ctk.CTkFrame(c, height=6, fg_color="transparent").grid(row=4, column=1)
 
     def _sched_ui(self, ts):
         c = card(ts, "Автоматический бэкап по расписанию"); c.pack(fill="x", padx=12, pady=(0, 8))
@@ -783,6 +863,7 @@ class App(ctk.CTk):
     # ---------- settings ----------
     def save_servers(self):
         self.save(); self.conn.refresh(); self.rconn.refresh(); self._sched_servers()
+        if hasattr(self, "srv_list"): self._srv_fill()
 
     def save(self):
         CFG_DIR.mkdir(parents=True, exist_ok=True)
