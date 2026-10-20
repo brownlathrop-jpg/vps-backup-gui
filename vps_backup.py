@@ -202,6 +202,53 @@ def is_due(now, hhmm, days, last_run):
     return last_run != now.strftime("%Y-%m-%d")
 
 
+class Broken(Exception):
+    """Архив или его часть повреждены / недокачаны."""
+
+
+def gz_check(path, cancel=None):
+    """Прочитать .gz до конца: проверяет CRC и что поток не оборван. Возвращает (ok, сообщение)."""
+    try:
+        with gzip.open(path, "rb") as f:
+            while f.read(1 << 20):
+                if cancel is not None and cancel.is_set(): raise Cancelled()
+        return True, "ok"
+    except Cancelled: raise
+    except (EOFError, OSError, gzip.BadGzipFile, Exception) as e:
+        return False, f"{Path(path).name}: файл оборван или повреждён ({e})"
+
+
+def _walk_tar(t, cancel=None, nested=True):
+    n = 0
+    for m in t:
+        if cancel is not None and cancel.is_set(): raise Cancelled()
+        n += 1
+        if not m.isfile(): continue
+        f = t.extractfile(m)
+        if nested and m.name.endswith("files.tar.gz"):
+            with tarfile.open(fileobj=f, mode="r|gz") as inner: n += _walk_tar(inner, cancel, False)
+            while f.read(1 << 20): pass
+        elif nested and m.name.endswith(".gz"):
+            g = gzip.GzipFile(fileobj=f)
+            while g.read(1 << 20):
+                if cancel is not None and cancel.is_set(): raise Cancelled()
+        else:
+            while f.read(1 << 20):
+                if cancel is not None and cancel.is_set(): raise Cancelled()
+    return n
+
+
+def verify_archive(path, cancel=None):
+    """Полная проверка бэкапа: внешний архив + каждая база + архив файлов внутри. (ok, сообщение)."""
+    try:
+        with tarfile.open(path, "r|gz") as t: n = _walk_tar(t, cancel)
+        if n < 2: return False, "архив пустой или неполный"
+        return True, f"архив целый, проверено объектов: {n}"
+    except Cancelled: raise
+    except Exception as e:
+        return False, f"архив повреждён или недокачан ({type(e).__name__}: {e})"
+
+
 class Cancelled(Exception):
     pass
 
@@ -502,6 +549,7 @@ class App(ctk.CTk):
         r = ctk.CTkFrame(af, fg_color="transparent"); r.pack(fill="x", padx=14, pady=(2, 6))
         self.arch = entry(r); self.arch.pack(side="left", fill="x", expand=True)
         btn(r, "Обзор", self._pick_archive, primary=False, width=70).pack(side="left", padx=(6, 0))
+        btn(r, "🔍 Проверить целостность", self._verify_click, primary=False, width=170).pack(side="left", padx=(6, 0))
         self.oslbl = ctk.CTkLabel(af, text="Выберите файл — программа покажет, с какого он сервера", justify="left",
                                   anchor="w", text_color=MUTED, fg_color=SOFT, corner_radius=8)
         self.oslbl.pack(fill="x", padx=14, pady=(0, 8), ipady=4, ipadx=8)
@@ -515,8 +563,7 @@ class App(ctk.CTk):
             pass
         rg = ctk.CTkFrame(rc, fg_color="transparent"); rg.pack(fill="x", padx=12, pady=(0, 8)); rg.columnconfigure((0, 1), weight=1)
         rl = [("clp", "🧩  Чистый сервер: установить CloudPanel"), ("web", "🌐  Файлы сайтов (/var/www, /home)"),
-              ("conf", "⚙  Настройки служб (/etc/...)"), ("db", "🗄  Базы данных (MySQL / PostgreSQL)"),
-              ("npm", "📦  Node.js: сам выполнить npm install и запустить pm2")]
+              ("conf", "⚙  Настройки служб (/etc/...)"), ("db", "🗄  Базы данных (MySQL / PostgreSQL)")]
         for i, (k, t) in enumerate(rl):
             chk(rg, t, self.ropt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=3)
         rb = ctk.CTkFrame(tr, fg_color="transparent"); rb.pack(fill="x", padx=12, pady=(0, 8))
@@ -876,6 +923,22 @@ class App(ctk.CTk):
         p = filedialog.askdirectory()
         if p: self.dest.delete(0, "end"); self.dest.insert(0, p)
 
+    def _verify_click(self):
+        p = self.arch.get().strip()
+        if not p or not Path(p).is_file(): return messagebox.showerror("Ошибка", "Выберите файл бэкапа (.tar.gz)")
+        if self.busy: return
+        self.q.put(("log", f"[*] Проверяю целостность: {Path(p).name} (может занять несколько минут)..."))
+        def job():
+            try:
+                ok, msg = verify_archive(p)
+            except Exception as e:
+                ok, msg = False, str(e)
+            self.q.put(("log", ("[✓] Архив исправен: " if ok else "[✗] Архив ПОВРЕЖДЁН: ") + msg))
+            self.after(0, lambda: (messagebox.showinfo if ok else messagebox.showerror)(
+                "Проверка целостности", ("Архив целый, его можно восстанавливать.\n\n" if ok else
+                "Архив повреждён или недокачан — восстанавливать его нельзя.\n\n") + msg))
+        threading.Thread(target=job, daemon=True).start()
+
     def _pick_archive(self):
         p = filedialog.askopenfilename(title="Файл бэкапа", initialdir=self.dest.get() or None,
                                        filetypes=[("Бэкап", "*.tar.gz"), ("Все файлы", "*.*")])
@@ -1104,13 +1167,19 @@ class App(ctk.CTk):
                 L("[*] Дамп MySQL/MariaDB...")
                 code, err = self._stream(ssh, MYSQL_CMD, tmp / "mysql_all.sql.gz", "MySQL")
                 if code == 3: L("[-] MySQL не найден"); (tmp / "mysql_all.sql.gz").unlink()
-                elif code == 0: L("[+] MySQL готово")
+                elif code == 0:
+                    ok, msg = gz_check(tmp / "mysql_all.sql.gz", self.cancel)
+                    if not ok: raise Broken(msg)
+                    L("[+] MySQL готово, целостность проверена")
                 else: L(f"[!] Ошибка дампа MySQL: {err[-300:]}"); errors.append("MySQL: " + err)
                 self.q.put(("bar", 0.15))
                 L("[*] Дамп PostgreSQL...")
                 code, err = self._stream(ssh, PG_CMD, tmp / "postgres_all.sql.gz", "PostgreSQL")
                 if code == 3: L("[-] PostgreSQL не найден"); (tmp / "postgres_all.sql.gz").unlink()
-                elif code == 0: L("[+] PostgreSQL готово")
+                elif code == 0:
+                    ok, msg = gz_check(tmp / "postgres_all.sql.gz", self.cancel)
+                    if not ok: raise Broken(msg)
+                    L("[+] PostgreSQL готово, целостность проверена")
                 else: L(f"[!] Ошибка дампа PostgreSQL: {err[-300:]}"); errors.append("PostgreSQL: " + err)
                 self.q.put(("bar", 0.25))
             if o["pkgs"]:
@@ -1132,15 +1201,23 @@ class App(ctk.CTk):
                 self.q.put(("bar", 0.35))
                 code, err = self._stream(ssh, cmd, tmp / "files.tar.gz", "Файлы")
                 if code == 5: L("[-] Папки не найдены"); (tmp / "files.tar.gz").unlink()
-                elif code in (0, 1): L(f"[+] Файлы скачаны ({(tmp/'files.tar.gz').stat().st_size/1048576:.1f} МБ)")
+                elif code in (0, 1):
+                    L(f"[+] Файлы скачаны ({(tmp/'files.tar.gz').stat().st_size/1048576:.1f} МБ), проверяю целостность...")
+                    self.q.put(("status", "Проверка архива файлов..."))
+                    try:
+                        with tarfile.open(tmp / "files.tar.gz", "r|gz") as tt: nf = _walk_tar(tt, self.cancel, False)
+                    except Cancelled: raise
+                    except Exception as e: raise Broken(f"архив файлов оборван или повреждён ({e})")
+                    L(f"[+] Архив файлов целый ({nf} объектов)")
                 else:
                     e2 = "\n".join(l for l in err.splitlines() if "socket ignored" not in l)
-                    L(f"[!] Ошибка архивации: {e2[-300:]}"); errors.append("tar: " + e2)
+                    raise Broken(f"архивация на сервере завершилась с ошибкой (код {code}): {e2[-300:]}")
                 err = "\n".join(l for l in err.splitlines() if "socket ignored" not in l)
                 if err and code in (0, 1): errors.append("tar warnings: " + err)
             if errors: (tmp / "errors.log").write_text("\n\n".join(errors), encoding="utf-8")
             self.q.put(("bar", 0.95)); L("[*] Упаковка в один файл...")
-            final = Path(c["dest"]) / (name + ".tar.gz")
+            done_path = Path(c["dest"]) / (name + ".tar.gz")
+            final = Path(c["dest"]) / (name + ".tar.gz.writing")
             # паспорт и ОС кладём первыми — так программа быстро читает ОС из архива
             first = {"backup_meta.json": 0, "os_release.txt": 1}
             items = sorted(tmp.iterdir(), key=lambda p: (first.get(p.name, 2), p.name))
@@ -1148,7 +1225,13 @@ class App(ctk.CTk):
                 for p in items:
                     if self.cancel.is_set(): raise Cancelled()
                     t.add(p, arcname=f"{name}/{p.name}")
+            L("[*] Проверка целостности итогового архива...")
+            self.q.put(("status", "Проверка целостности..."))
+            ok, msg = verify_archive(final, self.cancel)
+            if not ok: raise Broken(msg)
+            os.replace(final, done_path); final = done_path
             shutil.rmtree(tmp, ignore_errors=True); tmp = None
+            L(f"[✓] Целостность подтверждена: {msg}")
             L(f"[✓] ГОТОВО: {final} ({final.stat().st_size/1048576:.1f} МБ)")
             if c.get("cloud"): self._cloud_upload(final, c.get("name") or hn)
             self.q.put(("bar", 1.0)); self.q.put(("done", ("backup", True)))
@@ -1163,6 +1246,9 @@ class App(ctk.CTk):
                 try: final.unlink()
                 except Exception: pass
             if self.cancel.is_set(): L("[■] Бэкап остановлен пользователем."); self.q.put(("done", ("backup", None)))
+            elif isinstance(e, Broken):
+                L(f"[✗] БЭКАП НЕ СОХРАНЁН: {e}"); L("[i] Повреждённый файл удалён, чтобы не перепутать его с целым. Запустите бэкап ещё раз.")
+                self.q.put(("done", ("backup", False)))
             elif isinstance(e, NET_ERRORS) and attempt < 3:
                 L(f"[!] {net_msg(e)}"); L(f"[*] Подожду связь и начну бэкап заново (попытка {attempt + 1} из 3)")
                 retry = True
@@ -1356,8 +1442,8 @@ class App(ctk.CTk):
                         if code == 3: L("[-] На сервере нет PostgreSQL — пропущено")
                         else: L("[+] PostgreSQL восстановлен")
                         self.q.put(("bar", 0.9))
-            if o.get("npm") and o["web"]:
-                L("[*] Node.js-проекты: устанавливаю недостающие node_modules (npm install)...")
+            if o["web"]:  # решается автоматически: скрипт трогает только проекты без node_modules
+                L("[*] Node.js: ищу проекты без node_modules и при необходимости ставлю их сам...")
                 self._run_log(ssh, NPM_CMD)
             L("[*] Перезапуск служб...")
             out, _ = self._exec(ssh, RESTART_CMD, timeout=300)
