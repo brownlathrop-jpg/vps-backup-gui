@@ -438,7 +438,7 @@ class ConnForm(ctk.CTkFrame):
                 messagebox.askyesno("VPS Backup", f"Переименовать «{old}» в «{d['name']}»?"):
             self.app.servers.pop(old, None)
         prev = self.app.servers.get(old) or self.app.servers.get(d["name"]) or {}
-        d["note"] = prev.get("note", ""); d["added"] = prev.get("added") or time.strftime("%Y-%m-%d")
+        d["note"] = prev.get("note", ""); d["keep"] = prev.get("keep", 3); d["added"] = prev.get("added") or time.strftime("%Y-%m-%d")
         self.app.servers[d["name"]] = d; self.app.save_servers()
         self.app.q.put(("log", f"[+] Сервер «{d['name']}» сохранён в список"))
 
@@ -507,7 +507,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.10", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.11", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
@@ -557,6 +557,8 @@ class App(ctk.CTk):
         self.start = btn(b, "▶  Начать бэкап", self.run, width=180); self.start.pack(side="left")
         self.openb = btn(b, "📂  Открыть папку с бэкапами", self.open_dir, primary=False, state="disabled")
         self.openb.pack(side="left", padx=8)
+        self.poweroff = ctk.BooleanVar(value=False)
+        chk(tb, "⏻  Выключить компьютер после успешного бэкапа", self.poweroff).pack(anchor="w", padx=16, pady=(0, 8))
 
         # ----- вкладка восстановления -----
         af = card(tr, "Файл бэкапа"); af.pack(fill="x", padx=12, pady=(0, 8))
@@ -636,6 +638,29 @@ class App(ctk.CTk):
         if n in self.servers:
             self.servers[n]["note"] = tb.get("1.0", "end").strip(); self.save()
 
+    def _srv_keep(self, n, v):
+        if n in self.servers:
+            self.servers[n]["keep"] = 0 if v == "все" else int(v); self.save()
+
+    def _keep_of(self, server):
+        try: return int((self.servers.get(server) or {}).get("keep", 3))
+        except (TypeError, ValueError): return 3
+
+    def _copies(self, dest, server):
+        try: return sorted(Path(dest).glob(f"vps_backup_{safe_name(server)}_*.tar.gz"), key=lambda p: p.stat().st_mtime)
+        except Exception: return []
+
+    def _rotate(self, dest, server, keep, L, protect=None):
+        """Оставляет только keep последних копий сервера, остальные (самые старые) удаляет."""
+        if keep <= 0: return
+        fs = [p for p in self._copies(dest, server) if p != protect]
+        extra = len(fs) - (keep - 1 if protect else keep)
+        for p in fs[:max(0, extra)]:
+            try:
+                sz = p.stat().st_size; p.unlink()
+                L(f"[i] Ротация: удалена старая копия {p.name} ({human(sz)}), храним последних: {keep}")
+            except Exception as e: L(f"[!] Не удалось удалить старую копию {p.name}: {e}")
+
     def _srv_use(self, n, where):
         f = self.conn if where == "backup" else self.rconn
         f.prof.set(n); f.load(self.servers.get(n, {})); self.show(where)
@@ -669,7 +694,13 @@ class App(ctk.CTk):
                 bt, col = (f"✔ Последний бэкап: {time.strftime('%d.%m.%Y %H:%M', time.localtime(last.stat().st_mtime))}"
                            f"   ·   копий в папке: {cnt} ({size/1073741824:.1f} ГБ)" if size >= 107374182 else f"   ·   копий в папке: {cnt} ({size/1048576:.0f} МБ)"), OK
             else: bt, col = "Бэкапов в папке пока нет", WARN
-            ctk.CTkLabel(c, text=bt, text_color=col).grid(row=2, column=1, sticky="w")
+            kr = ctk.CTkFrame(c, fg_color="transparent"); kr.grid(row=2, column=1, sticky="w")
+            ctk.CTkLabel(kr, text=bt, text_color=col).pack(side="left")
+            ctk.CTkLabel(kr, text="   ·   хранить копий:", text_color=MUTED).pack(side="left")
+            kv = {0: "все"}.get(int(d.get("keep", 3)), str(d.get("keep", 3)))
+            km = ctk.CTkOptionMenu(kr, values=["1", "2", "3", "5", "7", "10", "все"], width=70, height=24,
+                                   command=lambda v, n=n: self._srv_keep(n, v))
+            km.set(kv); km.pack(side="left", padx=6)
             tb = ctk.CTkTextbox(c, height=46, fg_color="#FAFBFE", border_color=BORDER, border_width=1,
                                 corner_radius=8, text_color=TXT, font=ctk.CTkFont(FONT, 12), wrap="word")
             tb.grid(row=3, column=1, sticky="ew", pady=(6, 4))
@@ -1057,7 +1088,7 @@ class App(ctk.CTk):
         data = self.conn.dump()
         data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump(),
                     servers=self.servers, schedule=self.sched, cloud=getattr(self, "cloudcfg", {}) or {},
-                    to_cloud=self.to_cloud.get(), slim=self.slim.get())
+                    to_cloud=self.to_cloud.get(), slim=self.slim.get(), poweroff=self.poweroff.get())
         CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self):
@@ -1074,6 +1105,7 @@ class App(ctk.CTk):
         for k, v in d.get("opt", {}).items():
             if k in self.opt: self.opt[k].set(v)
         if "slim" in d: self.slim.set(bool(d["slim"]))
+        self.poweroff.set(bool(d.get("poweroff")))
         self._sched_load(d)
 
     # ---------- общее ----------
@@ -1243,6 +1275,7 @@ class App(ctk.CTk):
                     files_exp = fs * 0.6
         except Exception as e:
             L(f"[i] Не удалось оценить размер заранее ({e}) — продолжаю бэкап"); return 0
+        self._need_hi = hi
         if not parts: return 0
         try: free = shutil.disk_usage(dest).free
         except Exception: free = 0
@@ -1280,7 +1313,19 @@ class App(ctk.CTk):
                         contents=[v for k, v in names.items() if c["opt"].get(k)], slim=bool(c.get("slim")),
                         kind="без кэша (node_modules и кэши создаются заново)" if c.get("slim") else "полный")
             (tmp / "backup_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._need_hi = 0
             files_exp = self._estimate(ssh, c, c["dest"])
+            srv = c.get("name") or hn; keep = self._keep_of(srv)
+            try: free = shutil.disk_usage(c["dest"]).free
+            except Exception: free = 0
+            old = self._copies(c["dest"], srv)
+            # места мало: заранее удаляем самые старые копии, которые всё равно ушли бы по ротации
+            while free and self._need_hi and free < self._need_hi * 1.1 and keep >= 2 and len(old) >= keep:
+                p = old.pop(0)
+                try:
+                    sz = p.stat().st_size; p.unlink(); free += sz
+                    L(f"[i] Мало места: заранее удалена самая старая копия {p.name} ({human(sz)})")
+                except Exception as e: L(f"[!] Не удалось удалить {p.name}: {e}"); break
             L("[*] Режим «на лету»: на диске сервера ничего не создаётся")
             errors = []
             o = c["opt"]
@@ -1354,6 +1399,7 @@ class App(ctk.CTk):
             shutil.rmtree(tmp, ignore_errors=True); tmp = None
             L(f"[✓] Целостность подтверждена: {msg}")
             L(f"[✓] ГОТОВО: {final} ({final.stat().st_size/1048576:.1f} МБ)")
+            self._rotate(c["dest"], srv, keep, L, protect=final)
             if c.get("cloud"): self._cloud_upload(final, c.get("name") or hn)
             self.q.put(("bar", 1.0)); self.q.put(("done", ("backup", True)))
         except Cancelled:
@@ -1584,6 +1630,29 @@ class App(ctk.CTk):
             self.chan = None
             if ssh: ssh.close()
 
+    def _shutdown(self):
+        """Надёжное выключение: /f закрывает зависшие программы, 60 с на отмену."""
+        self.q.put(("log", "[i] Бэкап успешен — компьютер выключится через 60 секунд"))
+        try:
+            subprocess.run(["shutdown.exe", "/s", "/f", "/t", "60", "/c", "VPS Backup: бэкап завершён, выключение"],
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as e:
+            self.q.put(("log", f"[✗] Не удалось выключить компьютер: {e}")); return
+        w = ctk.CTkToplevel(self); w.title("VPS Backup"); w.attributes("-topmost", True); w.resizable(False, False)
+        lbl = ctk.CTkLabel(w, text="", font=ctk.CTkFont(FONT, 15)); lbl.pack(padx=30, pady=(24, 12))
+        st = {"t": 60, "on": True}
+        def cancel():
+            st["on"] = False
+            subprocess.run(["shutdown.exe", "/a"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.q.put(("log", "[i] Выключение компьютера отменено")); w.destroy()
+        def tick():
+            if not st["on"] or not w.winfo_exists(): return
+            lbl.configure(text=f"✔ Бэкап завершён.\nКомпьютер выключится через {st['t']} с")
+            st["t"] -= 1
+            if st["t"] >= 0: w.after(1000, tick)
+        btn(w, "Отменить выключение", cancel, width=220).pack(padx=30, pady=(0, 24))
+        w.protocol("WM_DELETE_WINDOW", cancel); tick()
+
     def _poll(self):
         try:
             while True:
@@ -1596,6 +1665,7 @@ class App(ctk.CTk):
                 elif k == "status": self.status.configure(text=v)
                 elif k == "done":
                     kind, ok = v
+                    if kind == "backup" and ok is not True: self._all_ok = False
                     if self.auto_mode and kind == "backup":
                         if ok is not None and self.sched_queue:
                             self._sched_next(); continue
@@ -1604,13 +1674,17 @@ class App(ctk.CTk):
                         for w in (self.start, self.openb, self.rstart, self.checkb): w.configure(state="normal")
                         self.stopb.configure(state="disabled")
                         self.status.configure(text="Бэкап по расписанию завершён" if ok is not None else "Остановлено")
+                        allok = getattr(self, "_all_ok", True); self._all_ok = True
+                        if allok and self.poweroff.get(): self._shutdown()
                         continue
                     self.busy = False
                     for w in (self.start, self.openb, self.rstart, self.checkb): w.configure(state="normal")
                     self.stopb.configure(state="disabled")
                     self.status.configure(text={True: "Готово", False: "Ошибка", None: "Остановлено"}[ok])
                     title = {"backup": "Бэкап", "restore": "Восстановление", "check": "Проверка"}[kind]
-                    if ok is True: messagebox.showinfo("VPS Backup", f"{title}: успешно")
+                    allok = getattr(self, "_all_ok", True); self._all_ok = True
+                    if kind == "backup" and ok is True and allok and self.poweroff.get(): self._shutdown()
+                    elif ok is True: messagebox.showinfo("VPS Backup", f"{title}: успешно")
                     elif ok is False: messagebox.showerror("VPS Backup", f"{title}: не удалось, см. лог")
         except queue.Empty: pass
         self.after(100, self._poll)
