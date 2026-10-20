@@ -1,9 +1,7 @@
 name: Build Windows EXE
 
 on:
-  push:
-    branches: [main, master]
-  workflow_dispatch:
+  workflow_dispatch:   # сборка только вручную: Actions → Build Windows EXE → Run workflow
 
 permissions:
   contents: write
@@ -25,7 +23,7 @@ jobs:
           pyinstaller --onefile --noconsole --name VPSBackup
           --icon icon.ico --add-data "icon.ico;." --splash splash.png
           --collect-all customtkinter
-          --hidden-import keyring.backends.Windows
+          --hidden-import keyring.backends.Windows --hidden-import cloud
           vps_backup.py
       - name: Publish release
         uses: softprops/action-gh-release@v2

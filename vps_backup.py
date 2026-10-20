@@ -4,6 +4,7 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import paramiko
+import cloud
 
 try:
     import keyring
@@ -408,7 +409,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.2", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.3", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 24, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(22, 0))
@@ -418,7 +419,8 @@ class App(ctk.CTk):
         self.pages, self.navb = {}, {}
         pages = [("backup", "💾   Создать бэкап", "Резервная копия сервера на ваш компьютер"),
                  ("restore", "🚀   Восстановление", "Развернуть бэкап на другом сервере — безопасно"),
-                 ("sched", "⏰   Расписание", "Автоматические бэкапы в заданное время")]
+                 ("sched", "⏰   Расписание", "Автоматические бэкапы в заданное время"),
+                 ("cloud", "☁   Облако", "Копия бэкапа в Яндекс Диск или Облако Mail.ru — настраивается один раз")]
         for key, label, sub in pages:
             pg = ctk.CTkScrollableFrame(host, fg_color="transparent", scrollbar_button_color=SOFT_H,
                                         scrollbar_button_hover_color="#C9D0E6")
@@ -432,6 +434,7 @@ class App(ctk.CTk):
         tb, tr, ts = (self.pages[k][0] for k in ("backup", "restore", "sched"))
         self._main = main
         self._sched_ui(ts)
+        self._cloud_ui(self.pages["cloud"][0])
 
         # ----- вкладка бэкапа -----
         self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", padx=12, pady=(0, 12))
@@ -446,6 +449,8 @@ class App(ctk.CTk):
         ctk.CTkLabel(df, text="Папка:", text_color=MUTED).pack(side="left", padx=(0, 8))
         self.dest = entry(df); self.dest.pack(side="left", fill="x", expand=True)
         btn(df, "Обзор", self._pick_dir, primary=False, width=70).pack(side="left", padx=(6, 0))
+        self.to_cloud = ctk.BooleanVar(value=False)
+        chk(c, "☁  Дублировать в облако (настройка — в разделе «Облако»)", self.to_cloud).pack(anchor="w", padx=16, pady=(0, 12))
         b = ctk.CTkFrame(tb, fg_color="transparent"); b.pack(fill="x", padx=12, pady=(0, 8))
         self.start = btn(b, "▶  Начать бэкап", self.run, width=180); self.start.pack(side="left")
         self.openb = btn(b, "📂  Открыть папку с бэкапами", self.open_dir, primary=False, state="disabled")
@@ -573,6 +578,106 @@ class App(ctk.CTk):
             if sc.get("last"): t += f"  •  последний запуск: {sc['last']}"
         self.s_info.configure(text=t, text_color=OK if sc.get("on") else MUTED)
 
+    # ---------- облако ----------
+    def _cloud_ui(self, pg):
+        c = card(pg, "Облачное хранилище"); c.pack(fill="x", padx=12, pady=(0, 12))
+        ctk.CTkLabel(c, text="После каждого бэкапа программа сама отправит копию в облако (и при бэкапе по расписанию). "
+                     "Если интернет пропадёт — копия на компьютере останется целой.", text_color=MUTED,
+                     wraplength=800, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+        self.c_prov = ctk.StringVar(value="Яндекс Диск")
+        ctk.CTkSegmentedButton(c, values=list(cloud.PROVIDERS.values()), variable=self.c_prov, height=36,
+                               selected_color=ACCENT, selected_hover_color=ACCENT_H, font=ctk.CTkFont(FONT, 13),
+                               command=lambda *_: self._cloud_hint()).pack(anchor="w", padx=16, pady=6)
+        g = ctk.CTkFrame(c, fg_color="transparent"); g.pack(fill="x", padx=16, pady=4); g.columnconfigure(1, weight=1)
+        rows = [("Почта / логин:", "c_login", {}), ("Пароль приложения:", "c_pwd", {"show": "•"}),
+                ("Папка в облаке:", "c_folder", {})]
+        for i, (t, attr, kw) in enumerate(rows):
+            ctk.CTkLabel(g, text=t, text_color=MUTED).grid(row=i, column=0, sticky="w", pady=4, padx=(0, 10))
+            e = entry(g, **kw); e.grid(row=i, column=1, sticky="ew", pady=4); setattr(self, attr, e)
+        self.c_folder.insert(0, "/VPS_Backups")
+        r = ctk.CTkFrame(c, fg_color="transparent"); r.pack(fill="x", padx=16, pady=4)
+        ctk.CTkLabel(r, text="Хранить последних копий каждого сервера:", text_color=MUTED).pack(side="left")
+        self.c_keep = entry(r, width=60); self.c_keep.insert(0, "5"); self.c_keep.pack(side="left", padx=8)
+        ctk.CTkLabel(r, text="(старые удаляются сами, 0 — не удалять)", text_color=MUTED).pack(side="left")
+        self.c_hint = ctk.CTkLabel(c, text="", justify="left", anchor="w", text_color=TXT, fg_color=SOFT,
+                                   corner_radius=8, wraplength=780)
+        self.c_hint.pack(fill="x", padx=16, pady=8, ipady=8, ipadx=8)
+        b = ctk.CTkFrame(c, fg_color="transparent"); b.pack(fill="x", padx=16, pady=(0, 14))
+        btn(b, "🔌  Проверить подключение", self._cloud_test, width=220).pack(side="left")
+        btn(b, "💾  Сохранить", self._cloud_save, primary=False).pack(side="left", padx=8)
+        self.c_stat = ctk.CTkLabel(b, text="", text_color=MUTED); self.c_stat.pack(side="left", padx=8)
+        self._cloud_hint()
+
+    def _cloud_key(self):
+        return {v: k for k, v in cloud.PROVIDERS.items()}.get(self.c_prov.get(), "yandex")
+
+    def _cloud_hint(self):
+        if self._cloud_key() == "yandex":
+            t = ("Как получить пароль приложения (1 минута):\n1. Откройте id.yandex.ru → «Безопасность» → «Пароли приложений».\n"
+                 "2. Создайте пароль для «Файлы (WebDAV)» и вставьте его сюда.\nЛогин — ваша почта Яндекса. Работает бесплатно.")
+        else:
+            t = ("Как получить пароль приложения (1 минута):\n1. Откройте почту Mail.ru → Настройки → «Безопасность» → "
+                 "«Пароли для внешних приложений».\n2. Создайте пароль (доступ: «Полный») и вставьте его сюда.\n"
+                 "Работает на бесплатном тарифе. Обычный пароль от почты не подойдёт.")
+        self.c_hint.configure(text=t)
+
+    def _cloud_cfg(self):
+        try: keep = max(0, int(self.c_keep.get() or 0))
+        except ValueError: keep = 5
+        return dict(provider=self._cloud_key(), login=self.c_login.get().strip(),
+                    folder=self.c_folder.get().strip() or "/VPS_Backups", keep=keep)
+
+    def _cloud_pwd(self, cc):
+        if not keyring: return ""
+        try: return keyring.get_password(APP, f"cloud:{cc['provider']}:{cc['login']}") or ""
+        except Exception: return ""
+
+    def _cloud_save(self, quiet=False):
+        cc = self._cloud_cfg(); pwd = self.c_pwd.get()
+        if keyring and cc["login"] and pwd:
+            try: keyring.set_password(APP, f"cloud:{cc['provider']}:{cc['login']}", pwd)
+            except Exception: pass
+        self.cloudcfg = cc; self.save()
+        if not quiet: self.c_stat.configure(text="Сохранено", text_color=OK)
+
+    def _cloud_load(self, d):
+        cc = d.get("cloud") or {}; self.cloudcfg = cc
+        self.c_prov.set(cloud.PROVIDERS.get(cc.get("provider", "yandex"), "Яндекс Диск"))
+        for e, k, dv in ((self.c_login, "login", ""), (self.c_folder, "folder", "/VPS_Backups"), (self.c_keep, "keep", 5)):
+            e.delete(0, "end"); e.insert(0, str(cc.get(k, dv)))
+        if cc.get("login"):
+            self.c_pwd.delete(0, "end"); self.c_pwd.insert(0, self._cloud_pwd(cc))
+        self.to_cloud.set(bool(d.get("to_cloud")))
+        self._cloud_hint()
+
+    def _cloud_test(self):
+        cc = self._cloud_cfg(); pwd = self.c_pwd.get()
+        self.c_stat.configure(text="Проверяю...", text_color=MUTED)
+        def job():
+            try:
+                c = cloud.open_cloud(cc["provider"], cc["login"], pwd); free, total = c.quota()
+                t, col = (f"✓ Подключено. Свободно {gb(free)} из {gb(total)}" if total else "✓ Подключено"), OK
+            except Exception as e:
+                t, col = f"✗ {e if isinstance(e, cloud.CloudError) else net_msg(e)}", ERR
+            self.after(0, lambda: self.c_stat.configure(text=t, text_color=col))
+            if col == OK: self.after(0, lambda: self._cloud_save(quiet=True))
+        threading.Thread(target=job, daemon=True).start()
+
+    def _cloud_upload(self, path, server):
+        cc = dict(self.cloudcfg or {}); L = lambda m: self.q.put(("log", m))
+        pwd = self._cloud_pwd(cc) if cc.get("login") else ""
+        if not cc.get("login") or not pwd:
+            L("[!] Облако не настроено — копия осталась только на компьютере (раздел «Облако»)"); return
+        def cb(done, total):
+            self.q.put(("bar", done / total if total else 1))
+            self.q.put(("status", f"Облако: {done/1048576:.0f} из {total/1048576:.0f} МБ"))
+        try:
+            cloud.send_backup(cc["provider"], cc["login"], pwd, cc.get("folder", "/VPS_Backups"), str(path),
+                              f"vps_backup_{safe_name(server)}_", int(cc.get("keep", 5)), L, cb, self.cancel)
+        except Exception as e:
+            msg = e if isinstance(e, cloud.CloudError) else net_msg(e)
+            L(f"[!] Не удалось отправить в облако: {msg}. Копия на компьютере сохранена.")
+
     def _toggle_autostart(self):
         try: set_autostart(self.auto.get())
         except Exception as e: messagebox.showerror("Ошибка", f"Не удалось изменить автозапуск: {e}")
@@ -609,7 +714,7 @@ class App(ctk.CTk):
             except Exception: pass
         cfg = dict(host=d.get("host", ""), port=int(d.get("port") or 22), user=d.get("user") or "root",
                    auth=d.get("auth", "password"), pwd=pwd, key=d.get("key", ""), name=n,
-                   dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()})
+                   dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get())
         self.q.put(("log", f"\n===== Сервер «{n}» ====="))
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
@@ -666,7 +771,8 @@ class App(ctk.CTk):
         CFG_DIR.mkdir(parents=True, exist_ok=True)
         data = self.conn.dump()
         data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump(),
-                    servers=self.servers, schedule=self.sched)
+                    servers=self.servers, schedule=self.sched, cloud=getattr(self, "cloudcfg", {}) or {},
+                    to_cloud=self.to_cloud.get())
         CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self):
@@ -677,7 +783,7 @@ class App(ctk.CTk):
             n = d.get("name") or d["host"]
             self.servers[n] = {k: d.get(k, "") for k in ("host", "port", "user", "auth", "key")} | {"name": n}
             d["name"] = n
-        self.conn.load(d); self.rconn.load(d.get("restore", {}))
+        self.conn.load(d); self.rconn.load(d.get("restore", {})); self._cloud_load(d)
         self.conn.refresh(); self.rconn.refresh()
         self.dest.delete(0, "end"); self.dest.insert(0, d.get("dest", str(Path.home() / "VPS_Backups")))
         for k, v in d.get("opt", {}).items():
@@ -754,7 +860,7 @@ class App(ctk.CTk):
         if not self.conn.host.get().strip(): return messagebox.showerror("Ошибка", "Укажите IP или хост сервера")
         if not any(v.get() for v in self.opt.values()): return messagebox.showerror("Ошибка", "Выберите, что бэкапить")
         self._begin()
-        cfg = self.conn.cfg(); cfg.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()})
+        cfg = self.conn.cfg(); cfg.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get())
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
     def _stream(self, ssh, cmd, path, label):
@@ -860,6 +966,7 @@ class App(ctk.CTk):
                     t.add(p, arcname=f"{name}/{p.name}")
             shutil.rmtree(tmp, ignore_errors=True); tmp = None
             L(f"[✓] ГОТОВО: {final} ({final.stat().st_size/1048576:.1f} МБ)")
+            if c.get("cloud"): self._cloud_upload(final, c.get("name") or hn)
             self.q.put(("bar", 1.0)); self.q.put(("done", ("backup", True)))
         except Cancelled:
             L("[■] Бэкап остановлен пользователем. На сервере ничего не осталось.")
