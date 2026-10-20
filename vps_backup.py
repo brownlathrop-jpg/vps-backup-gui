@@ -1,5 +1,5 @@
 """VPS Backup — GUI-приложение для резервного копирования VPS на локальный ПК."""
-import json, os, re, socket, queue, shlex, shutil, tarfile, threading, time, subprocess, sys
+import gzip, json, os, re, socket, queue, shlex, shutil, tarfile, threading, time, subprocess, sys
 from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -40,8 +40,10 @@ set -o pipefail
 MYSQL_CMD = MYSQL_AUTH.replace("command -v mysql ", "command -v mysqldump ") + \
     "mysqldump $A --all-databases --single-transaction --routines --events --quick | gzip -c"
 MYSQL_RESTORE = MYSQL_AUTH + "gunzip -c | mysql $A"
+MYSQL_RESTORE_RAW = MYSQL_AUTH + "mysql $A"
 PG_RESTORE = "command -v psql >/dev/null 2>&1 || { echo NOPG >&2; exit 3; }; " \
              "gunzip -c | su - postgres -c 'psql -q -o /dev/null' 2>&1 | grep -v 'already exists' | tail -50 >&2; exit 0"
+PG_RESTORE_RAW = PG_RESTORE.replace("gunzip -c | ", "")
 OS_CMD = ". /etc/os-release 2>/dev/null; echo \"${PRETTY_NAME:-$(uname -sr)}\"; echo \"ID=$ID\"; echo \"VERSION_ID=$VERSION_ID\""
 CLP_INSTALL = ("command -v clpctl >/dev/null 2>&1 && { echo 'CloudPanel уже установлен'; exit 0; }; "
                "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y curl wget sudo && "
@@ -53,6 +55,83 @@ RESTART_CMD = ("for s in nginx apache2 httpd mysql mariadb postgresql cron; do s
                "systemctl restart $s 2>/dev/null && echo \"перезапущен $s\"; done; true")
 PG_CMD = "command -v pg_dumpall >/dev/null 2>&1 || { echo NOPG >&2; exit 3; }; " \
          "set -o pipefail; (su - postgres -c pg_dumpall 2>/dev/null || sudo -u postgres pg_dumpall) | gzip -c"
+SYS_MY = {"information_schema", "mysql", "performance_schema", "sys"}
+SYS_PG = {"postgres", "template0", "template1"}
+# Аудит целевого сервера: ТОЛЬКО ЧТЕНИЕ. Каждая строка — "ТИП:значение"
+AUDIT_CMD = (r"""
+for d in /home/*/; do [ -d "$d" ] || continue; u=$(basename "$d"); case "$u" in clp|lost+found) continue;; esac
+  [ -n "$(ls -A "$d" 2>/dev/null | grep -v '^\.')" ] && echo "SITE:/home/$u"; done
+for d in /var/www/*; do [ -e "$d" ] || continue; b=$(basename "$d")
+  if [ "$b" = html ]; then n=$(ls -A "$d" 2>/dev/null | grep -vE '^index\.(nginx-debian\.)?html?$' | wc -l); [ "$n" -gt 0 ] && echo "WWW:$d"
+  else echo "WWW:$d"; fi; done
+[ -d /home/clp ] && echo "CLPDATA:yes"
+(""" + MYSQL_AUTH + """mysql $A -N -e 'SHOW DATABASES' | sed 's/^/MYDB:/') 2>/dev/null
+command -v psql >/dev/null 2>&1 && { su - postgres -c "psql -At -c 'SELECT datname FROM pg_database'" | sed 's/^/PGDB:/'
+  su - postgres -c "psql -At -c 'SELECT rolname FROM pg_roles'" | sed 's/^/PGROLE:/'; } 2>/dev/null
+for s in clpctl nginx apache2 httpd mysql mariadb psql php; do command -v $s >/dev/null 2>&1 && echo "SVC:$s"; done
+true""")
+
+
+def parse_audit(out):
+    """Разбирает вывод AUDIT_CMD. level: green / yellow / red."""
+    a = {"sites": [], "my": set(), "pg": set(), "roles": set(), "svc": [], "clpdata": False}
+    for l in out.splitlines():
+        k, _, v = l.strip().partition(":")
+        v = v.strip()
+        if not v: continue
+        if k in ("SITE", "WWW"): a["sites"].append(v)
+        elif k == "MYDB": a["my"].add(v)
+        elif k == "PGDB": a["pg"].add(v)
+        elif k == "PGROLE": a["roles"].add(v)
+        elif k == "SVC": a["svc"].append(v)
+        elif k == "CLPDATA": a["clpdata"] = True
+    a["my_user"] = sorted(a["my"] - SYS_MY)
+    a["pg_user"] = sorted(a["pg"] - SYS_PG)
+    a["level"] = "red" if (a["sites"] or a["my_user"] or a["pg_user"]) else ("yellow" if a["svc"] else "green")
+    return a
+
+
+def audit_text(a):
+    r = []
+    if a["sites"]: r.append("Папки сайтов: " + ", ".join(a["sites"][:15]) + (" …" if len(a["sites"]) > 15 else ""))
+    if a["my_user"]: r.append("Базы MySQL: " + ", ".join(a["my_user"][:15]))
+    if a["pg_user"]: r.append("Базы PostgreSQL: " + ", ".join(a["pg_user"][:15]))
+    if a["svc"]: r.append("Установлено: " + ", ".join(a["svc"]))
+    return r
+
+
+class DumpFilter:
+    """Читает .sql.gz и пропускает разделы указанных баз (безопасный режим). Отдаёт несжатый SQL."""
+    def __init__(self, src, kind, skip_db, skip_roles=()):
+        self.g = gzip.GzipFile(fileobj=src); self.kind = kind
+        self.skip = set(skip_db); self.roles = set(skip_roles)
+        self.cur = None; self.buf = b""; self.eof = False; self.skipped = set()
+
+    def _ok(self, line):
+        if self.kind == "my":
+            m = re.match(rb"-- Current Database: `(.+)`", line)
+            if m: self.cur = m.group(1).decode("utf-8", "replace")
+        else:
+            m = re.match(rb"\\connect\s+(?:-reuse-previous=on\s+)?\"?([^\"\s]+)", line)
+            if m: self.cur = m.group(1).decode("utf-8", "replace")
+            m = re.match(rb"(CREATE|ALTER) (ROLE|DATABASE) \"?([^\"\s;]+)", line)
+            if m:
+                n = m.group(3).decode("utf-8", "replace")
+                if (m.group(2) == b"ROLE" and n in self.roles) or (m.group(2) == b"DATABASE" and n in self.skip):
+                    return False
+        if self.cur in self.skip:
+            self.skipped.add(self.cur); return False
+        return True
+
+    def read(self, n):
+        while len(self.buf) < n and not self.eof:
+            line = self.g.readline()
+            if not line: self.eof = True; break
+            if self._ok(line): self.buf += line
+        d, self.buf = self.buf[:n], self.buf[n:]
+        return d
+
+
 PKG_CMDS = {"packages_dpkg.txt": "dpkg --get-selections", "packages_manual.txt": "apt-mark showmanual",
             "packages_rpm.txt": "rpm -qa", "packages_snap.txt": "snap list", "packages_pip.txt": "pip3 freeze"}
 
@@ -572,9 +651,52 @@ class App(ctk.CTk):
         self._sched_load(d)
 
     # ---------- общее ----------
+    def _ask_dialog(self, a):
+        """Окно-блокировка: сервер не пустой. Результат кладётся в self.decision."""
+        w = ctk.CTkToplevel(self); w.title("Сервер не пустой!"); w.geometry("640x620"); w.configure(fg_color=BG)
+        w.transient(self); w.grab_set(); w.resizable(False, False)
+        res = {"v": None}
+        ctk.CTkLabel(w, text="🔴  На сервере уже есть чужие данные", font=("Segoe UI", 18, "bold"),
+                     text_color=ERR).pack(anchor="w", padx=20, pady=(18, 4))
+        ctk.CTkLabel(w, text="Восстановление может их перезаписать. Проверьте список и выберите, как поступить.",
+                     text_color=MUTED, wraplength=600, justify="left").pack(anchor="w", padx=20)
+        tb = ctk.CTkTextbox(w, height=150, fg_color=CARD, border_color=BORDER, border_width=1, text_color=TXT)
+        tb.pack(fill="x", padx=20, pady=10); tb.insert("end", "\n".join("•  " + x for x in audit_text(a))); tb.configure(state="disabled")
+        mode = ctk.StringVar(value="safe")
+        f = card(w, "Режим восстановления"); f.pack(fill="x", padx=20, pady=4)
+        ctk.CTkRadioButton(f, text="🛡  Безопасный: только добавить. Существующие файлы и базы НЕ трогать",
+                           variable=mode, value="safe", text_color=TXT, fg_color=ACCENT).pack(anchor="w", padx=16, pady=4)
+        ctk.CTkRadioButton(f, text="⚠  Полная перезапись совпадающих файлов и баз",
+                           variable=mode, value="overwrite", text_color=ERR, fg_color=ERR).pack(anchor="w", padx=16, pady=(4, 10))
+        rb = ctk.BooleanVar(value=True)
+        chk(w, "💾  Сначала скачать копию текущих данных этого сервера на компьютер (для отката)", rb).pack(anchor="w", padx=24, pady=8)
+        cf = ctk.CTkFrame(w, fg_color="transparent"); cf.pack(fill="x", padx=24)
+        lbl = ctk.CTkLabel(cf, text="Для перезаписи введите слово ПОДТВЕРЖДАЮ:", text_color=TXT)
+        ent = entry(cf, width=200)
+        go = btn(w, "Продолжить", None, width=160)
+        def upd(*_):
+            ov = mode.get() == "overwrite"
+            if ov: lbl.pack(side="left"); ent.pack(side="left", padx=8)
+            else: lbl.pack_forget(); ent.pack_forget()
+            go.configure(state="normal" if (not ov or ent.get().strip().upper() == "ПОДТВЕРЖДАЮ") else "disabled")
+        mode.trace_add("write", upd); ent.bind("<KeyRelease>", upd)
+        def ok():
+            if mode.get() == "overwrite" and not rb.get():
+                if not messagebox.askyesno("Без копии?", "Перезапись БЕЗ резервной копии текущих данных.\n"
+                                           "Если что-то пойдёт не так — восстановить будет нечем. Продолжить?",
+                                           icon="warning", parent=w): return
+            res["v"] = {"mode": mode.get(), "rollback": rb.get()}; w.destroy()
+        go.configure(command=ok)
+        bb = ctk.CTkFrame(w, fg_color="transparent"); bb.pack(fill="x", padx=20, pady=16, side="bottom")
+        go.pack(in_=bb, side="right")
+        btn(bb, "Отмена", w.destroy, primary=False, width=110).pack(side="right", padx=8)
+        upd()
+        self.wait_window(w)
+        self.decision = res["v"]; self.decision_ev.set()
+
     def _begin(self):
         if self.remember.get(): self.save()
-        self.busy = True; self.cancel.clear()
+        self.busy = True; self.cancel.clear(); self.decision_ev = threading.Event(); self.decision = None
         for w in (self.start, self.openb, self.rstart, self.checkb): w.configure(state="disabled")
         self.stopb.configure(state="normal"); self.log.delete("1.0", "end"); self.bar.set(0)
 
@@ -811,9 +933,46 @@ class App(ctk.CTk):
             L("[✓] Места достаточно")
             if o["clp"] and tos[1] not in ("ubuntu", "debian"):
                 L("[!] CloudPanel устанавливается только на Ubuntu или Debian")
+            # --- аудит: есть ли на сервере чужие данные ---
+            L("[*] Проверяю, нет ли на сервере чужих сайтов и баз...")
+            out, _ = self._exec(ssh, AUDIT_CMD, timeout=120); a = parse_audit(out)
+            for x in audit_text(a): L("    " + x)
+            if a["level"] == "green": L("[✓] 🟢 Сервер чистый — можно разворачивать")
+            elif a["level"] == "yellow": L("[!] 🟡 Установлены программы, но чужих сайтов и баз нет")
+            else: L("[✗] 🔴 СЕРВЕР НЕ ПУСТОЙ: найдены сайты или базы. Нужна защита от перезаписи")
+            clp_here = "clpctl" in a["svc"]
+            if o["clp"] and not clp_here and any(x in a["svc"] for x in ("nginx", "apache2", "httpd", "mysql", "mariadb")):
+                L("[✗] Установить CloudPanel нельзя: на сервере уже есть веб-сервер или MySQL. "
+                  "CloudPanel ставится только на чистую систему. Снимите галочку или возьмите чистый сервер.")
+                self.q.put(("done", ("check" if c["check_only"] else "restore", False))); return
             if c["check_only"]:
                 L("[✓] Проверка завершена, на сервере ничего не изменено"); self.q.put(("bar", 1.0))
                 self.q.put(("done", ("check", True))); return
+            mode, rollback = "overwrite", False
+            if a["level"] == "red":
+                self.q.put(("ask", a)); self.decision_ev.wait()
+                if not self.decision or self.cancel.is_set():
+                    L("[■] Отменено. На сервере ничего не изменено."); self.q.put(("done", ("restore", None))); return
+                mode, rollback = self.decision["mode"], self.decision["rollback"]
+                L(f"[i] Режим: {'🛡 безопасный (только добавление)' if mode == 'safe' else '⚠ перезапись'}")
+            if rollback:
+                rdir = arch.parent / f"rollback_{safe_name(c.get('host', 'server'))}_{time.strftime('%Y-%m-%d_%H-%M')}"
+                rdir.mkdir(parents=True, exist_ok=True)
+                L(f"[*] Сохраняю копию текущих данных сервера в {rdir} ...")
+                tp = " ".join(shlex.quote(x) for x in (WEB_PATHS if o["web"] else []) + (CONF_PATHS if o["conf"] else []))
+                if tp:
+                    code, err = self._stream(ssh, f"cd / && E=''; for x in {tp}; do [ -e \"$x\" ] && E=\"$E $x\"; done; "
+                                             "[ -n \"$E\" ] && tar -czpf - --numeric-owner --ignore-failed-read $E",
+                                             rdir / "files.tar.gz", "Копия файлов")
+                    if code not in (0, 1): raise RuntimeError(f"не удалось сохранить копию файлов: {err[-200:]}")
+                if o["db"] and a["my_user"]:
+                    code, err = self._stream(ssh, MYSQL_CMD, rdir / "mysql_all.sql.gz", "Копия MySQL")
+                    if code != 0: raise RuntimeError(f"не удалось сохранить копию MySQL: {err[-200:]}")
+                if o["db"] and a["pg_user"]:
+                    code, err = self._stream(ssh, PG_CMD, rdir / "postgres_all.sql.gz", "Копия PostgreSQL")
+                    if code != 0: raise RuntimeError(f"не удалось сохранить копию PostgreSQL: {err[-200:]}")
+                L("[+] Копия для отката сохранена. Только после этого начинаю запись.")
+            safe = mode == "safe"
             # --- CloudPanel ---
             if o["clp"]:
                 L("[*] Установка CloudPanel (обычно 5–15 минут)...")
@@ -832,7 +991,9 @@ class App(ctk.CTk):
                         L("[*] Распаковка файлов на сервер (может занять долго)...")
                         pats = " ".join(shlex.quote(p) for p in prefixes)
                         both = o["web"] and o["conf"]
-                        cmd = "tar -xzpf - -C / --numeric-owner" + ("" if both else f" --wildcards {pats}")
+                        cmd = "tar -xzpf - -C / --numeric-owner" + (" --skip-old-files" if safe else "") + \
+                              ("" if both else f" --wildcards {pats}")
+                        if safe: L("    существующие файлы на сервере пропускаются")
                         code, err = self._send(ssh, cmd, t.extractfile(m), "Файлы", m.size)
                         if code in (0, 2): L("[+] Файлы восстановлены")
                         else: L(f"[!] Ошибка распаковки: {err[-300:]}")
@@ -840,14 +1001,25 @@ class App(ctk.CTk):
                         self.q.put(("bar", 0.6))
                     elif fn == "mysql_all.sql.gz" and o["db"]:
                         L("[*] Импорт баз MySQL/MariaDB...")
-                        code, err = self._send(ssh, MYSQL_RESTORE, t.extractfile(m), "MySQL", m.size)
+                        if safe:
+                            src = DumpFilter(t.extractfile(m), "my", a["my"] | SYS_MY)
+                            code, err = self._send(ssh, MYSQL_RESTORE_RAW, src, "MySQL", 0)
+                            if src.skipped: L("    не тронуты (уже есть на сервере): " + ", ".join(sorted(src.skipped)))
+                            L("[!] Пользователи MySQL не перенесены (безопасный режим) — сайтам может понадобиться создать их в панели")
+                        else:
+                            code, err = self._send(ssh, MYSQL_RESTORE, t.extractfile(m), "MySQL", m.size)
                         if code == 3: L("[-] На сервере нет MySQL — пропущено (отметьте установку CloudPanel)")
                         elif code == 0: L("[+] MySQL восстановлен")
                         else: L(f"[!] Ошибка импорта MySQL: {err[-300:]}")
                         self.q.put(("bar", 0.8))
                     elif fn == "postgres_all.sql.gz" and o["db"]:
                         L("[*] Импорт баз PostgreSQL...")
-                        code, err = self._send(ssh, PG_RESTORE, t.extractfile(m), "PostgreSQL", m.size)
+                        if safe:
+                            src = DumpFilter(t.extractfile(m), "pg", a["pg"] | SYS_PG, a["roles"])
+                            code, err = self._send(ssh, PG_RESTORE_RAW, src, "PostgreSQL", 0)
+                            if src.skipped: L("    не тронуты (уже есть на сервере): " + ", ".join(sorted(src.skipped)))
+                        else:
+                            code, err = self._send(ssh, PG_RESTORE, t.extractfile(m), "PostgreSQL", m.size)
                         if code == 3: L("[-] На сервере нет PostgreSQL — пропущено")
                         else: L("[+] PostgreSQL восстановлен")
                         self.q.put(("bar", 0.9))
@@ -877,6 +1049,7 @@ class App(ctk.CTk):
                     tag = {"[✓": "ok", "[+": "ok", "[!": "warn", "[■": "warn", "[✗": "err", "[i": "info"}.get(v[:2])
                     self.log.insert("end", v + "\n", tag); self.log.see("end")
                 elif k == "bar": self.bar.set(v)
+                elif k == "ask": self._ask_dialog(v)
                 elif k == "status": self.status.configure(text=v)
                 elif k == "done":
                     kind, ok = v
