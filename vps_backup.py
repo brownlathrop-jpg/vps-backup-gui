@@ -67,6 +67,18 @@ MYSQL_RESTORE_RAW = MYSQL_AUTH + "mysql $A"
 PG_RESTORE = "command -v psql >/dev/null 2>&1 || { echo NOPG >&2; exit 3; }; " \
              "gunzip -c | su - postgres -c 'psql -q -o /dev/null' 2>&1 | grep -v 'already exists' | tail -50 >&2; exit 0"
 PG_RESTORE_RAW = PG_RESTORE.replace("gunzip -c | ", "")
+MYSQL_SIZE_CMD = MYSQL_AUTH + "mysql $A -N -e \"SELECT COALESCE(SUM(data_length+index_length),0) FROM information_schema.tables\""
+PG_SIZE_CMD = ("command -v psql >/dev/null 2>&1 || exit 3; "
+               "su - postgres -c \"psql -At -c 'SELECT COALESCE(SUM(pg_database_size(datname)),0) FROM pg_database'\" 2>/dev/null")
+
+
+def human(n):
+    n = float(n)
+    for u in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if n < 1024 or u == "ТБ": return f"{n:.0f} {u}" if u in ("Б", "КБ") else f"{n:.1f} {u}"
+        n /= 1024
+
+
 OS_CMD = ". /etc/os-release 2>/dev/null; echo \"${PRETTY_NAME:-$(uname -sr)}\"; echo \"ID=$ID\"; echo \"VERSION_ID=$VERSION_ID\""
 CLP_INSTALL = ("command -v clpctl >/dev/null 2>&1 && { echo 'CloudPanel уже установлен'; exit 0; }; "
                "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y curl wget sudo && "
@@ -495,7 +507,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.9", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.10", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
@@ -1137,7 +1149,7 @@ class App(ctk.CTk):
         cfg = self.conn.cfg(); cfg.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get(), slim=self.slim.get())
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
-    def _stream(self, ssh, cmd, path, label):
+    def _stream(self, ssh, cmd, path, label, expect=0):
         """Выполняет команду на сервере и пишет её вывод прямо в локальный файл. Возвращает (код, stderr)."""
         if self.cancel.is_set(): raise Cancelled()
         ch = ssh.get_transport().open_session(); self.chan = ch
@@ -1182,7 +1194,8 @@ class App(ctk.CTk):
                     time.sleep(0.02)
                 if time.time() - last > 0.3:
                     last = time.time(); sp = done / max(last - t0, 0.1) / 1048576
-                    self.q.put(("status", f"{label}: {done/1048576:.1f} МБ  ({sp:.1f} МБ/с)"))
+                    tail = f" из ~{human(expect)}" if expect else ""
+                    self.q.put(("status", f"{label}: {human(done)}{tail}  ({sp:.1f} МБ/с)"))
         if self.cancel.is_set(): raise Cancelled()
         code = ch.recv_exit_status(); self.chan = None; ch.close()
         return code, err.decode("utf-8", "replace").strip()
@@ -1200,6 +1213,47 @@ class App(ctk.CTk):
             else: self.q.put(("status", f"Связь потеряна. Повтор через {left} с..."))
             time.sleep(1)
         return False
+
+    def _estimate(self, ssh, c, dest):
+        """Быстрая оценка объёма данных на сервере до скачивания. Возвращает ожидаемый размер файлов (сжатый)."""
+        L = lambda m: self.q.put(("log", m))
+        o = c["opt"]; parts = []; lo = hi = 0; files_exp = 0
+        self.q.put(("status", "Оценка размера данных на сервере..."))
+        try:
+            if o.get("db"):
+                db = 0
+                for cmd in (MYSQL_SIZE_CMD, PG_SIZE_CMD):
+                    out, code = self._exec(ssh, cmd, timeout=40)
+                    if code == 0:
+                        try: db += int((out.strip().splitlines() or ["0"])[-1].strip() or 0)
+                        except ValueError: pass
+                if db:
+                    parts.append(f"базы ~{human(db)}"); lo += db / 8; hi += db / 3
+            paths = (WEB_PATHS if o.get("web") else []) + (CONF_PATHS if o.get("conf") else [])
+            if paths:
+                ex = "".join(f"--exclude={shlex.quote(x)} " for x in (SLIM_EXCLUDES if c.get("slim") else ["*.sock"]))
+                plist = " ".join(shlex.quote(p) for p in paths)
+                cmd = (f'cd / && P=""; for p in {plist}; do [ -e "/$p" ] && P="$P $p"; done; '
+                       '[ -z "$P" ] && { echo 0; exit 0; }; du -scb ' + ex + '$P 2>/dev/null | tail -1 | cut -f1')
+                out, code = self._exec(ssh, cmd, timeout=120)
+                try: fs = int(out.strip().split()[0])
+                except (ValueError, IndexError): fs = 0
+                if fs:
+                    parts.append(f"файлы ~{human(fs)}"); lo += fs * 0.35; hi += fs * 0.9
+                    files_exp = fs * 0.6
+        except Exception as e:
+            L(f"[i] Не удалось оценить размер заранее ({e}) — продолжаю бэкап"); return 0
+        if not parts: return 0
+        try: free = shutil.disk_usage(dest).free
+        except Exception: free = 0
+        L(f"[i] Оценка данных на сервере: {', '.join(parts)}. "
+          f"Ожидаемый архив: {human(lo)}–{human(hi)}" + (f" (свободно на диске: {human(free)})" if free else ""))
+        if free and free < hi * 1.1:
+            if free < lo:
+                L(f"[!] ВНИМАНИЕ: на диске почти наверняка не хватит места (нужно ~{human(lo)}–{human(hi)}, свободно {human(free)})")
+            else:
+                L(f"[!] Места на диске впритык — бэкап может не поместиться (свободно {human(free)})")
+        return files_exp
 
     def _worker(self, c, attempt=1):
         L = lambda m: self.q.put(("log", m))
@@ -1226,6 +1280,7 @@ class App(ctk.CTk):
                         contents=[v for k, v in names.items() if c["opt"].get(k)], slim=bool(c.get("slim")),
                         kind="без кэша (node_modules и кэши создаются заново)" if c.get("slim") else "полный")
             (tmp / "backup_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            files_exp = self._estimate(ssh, c, c["dest"])
             L("[*] Режим «на лету»: на диске сервера ничего не создаётся")
             errors = []
             o = c["opt"]
@@ -1265,7 +1320,7 @@ class App(ctk.CTk):
                 if c.get("slim"): L("[i] Режим «без кэша»: node_modules, кэши и логи пропускаются")
                 L("[*] Архивация и скачивание файлов сайтов/конфигураций (может занять долго)...")
                 self.q.put(("bar", 0.35))
-                code, err = self._stream(ssh, cmd, tmp / "files.tar.gz", "Файлы")
+                code, err = self._stream(ssh, cmd, tmp / "files.tar.gz", "Файлы", files_exp)
                 if code == 5: L("[-] Папки не найдены"); (tmp / "files.tar.gz").unlink()
                 elif code in (0, 1):
                     L(f"[+] Файлы скачаны ({(tmp/'files.tar.gz').stat().st_size/1048576:.1f} МБ), проверяю целостность...")
