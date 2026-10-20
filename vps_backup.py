@@ -6,6 +6,13 @@ from tkinter import filedialog, messagebox
 import paramiko
 import cloud
 
+VERSION = "4.12"
+RCLONE_URL = {"mailru": "https://webdav.cloud.mail.ru", "yandex": "https://webdav.yandex.ru"}
+RCLONE_INSTALL = ("command -v rclone >/dev/null 2>&1 && { echo \"rclone уже установлен\"; exit 0; }; "
+    "echo \"Устанавливаю rclone...\"; (command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || dnf install -y unzip >/dev/null 2>&1); "
+    "curl -fsSL https://rclone.org/install.sh | bash >/dev/null 2>&1 || apt-get install -y rclone >/dev/null 2>&1 || yum install -y rclone >/dev/null 2>&1; "
+    "command -v rclone >/dev/null 2>&1 && echo \"rclone установлен\"")
+
 try:
     import keyring
 except Exception:
@@ -475,7 +482,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("light")
-        self.title("VPS Backup")
+        self.title(f"VPS Backup v{VERSION}")
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h = min(1180, sw - 40), min(900, sh - 90)
         self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h - 50) // 2)}")
@@ -507,7 +514,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.11", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text=f"версия {VERSION}", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
@@ -534,6 +541,7 @@ class App(ctk.CTk):
         self._main = main
         self._sched_ui(ts)
         self._cloud_ui(self.pages["cloud"][0])
+        self.after(400, lambda: self.q.put(("log", f"[i] VPS Backup v{VERSION} готов к работе")))
         self._srv_ui(self.pages["servers"][0])
 
         # ----- вкладка бэкапа -----
@@ -823,6 +831,15 @@ class App(ctk.CTk):
         gr2 = ctk.CTkFrame(self.g_row, fg_color="transparent"); gr2.pack(fill="x", padx=16, pady=4)
         btn(gr2, "💾  Сохранить коды Google", self._google_creds_save, primary=False).pack(side="left")
         self.g_stat = ctk.CTkLabel(gr2, text="", text_color=MUTED); self.g_stat.pack(side="left", padx=8)
+        self.direct = ctk.BooleanVar(value=False); self.save_pc = ctk.BooleanVar(value=True)
+        dr = ctk.CTkFrame(c, fg_color=SOFT, corner_radius=8); dr.pack(fill="x", padx=16, pady=(8, 4))
+        dc = chk(dr, "🚀  Отправлять в облако напрямую с сервера (минуя компьютер) — Mail.ru и Яндекс Диск", self.direct)
+        dc.configure(command=self._direct_toggle); dc.pack(anchor="w", padx=10, pady=(8, 2))
+        self.save_pc_chk = chk(dr, "💻  Также сохранять копию на этот компьютер", self.save_pc)
+        self.save_pc_chk.pack(anchor="w", padx=34, pady=(2, 2))
+        ctk.CTkLabel(dr, text="Сервер сам упакует архив и загрузит его в облако на своей скорости, затем удалит временный файл. "
+                     "Нужно свободное место на диске сервера размером с архив.", text_color=MUTED, wraplength=760,
+                     justify="left").pack(anchor="w", padx=10, pady=(0, 8))
         self.c_hint = ctk.CTkLabel(c, text="", justify="left", anchor="w", text_color=TXT, fg_color=SOFT,
                                    corner_radius=8, wraplength=780)
         self.c_hint.pack(fill="x", padx=16, pady=8, ipady=8, ipadx=8)
@@ -832,6 +849,9 @@ class App(ctk.CTk):
         btn(b, "💾  Сохранить", self._cloud_save, primary=False).pack(side="left", padx=8)
         self.c_stat = ctk.CTkLabel(b, text="", text_color=MUTED); self.c_stat.pack(side="left", padx=8)
         self._cloud_hint()
+
+    def _direct_toggle(self):
+        self.save_pc_chk.configure(state="normal" if self.direct.get() else "disabled")
 
     def _cloud_key(self):
         return {v: k for k, v in cloud.PROVIDERS.items()}.get(self.c_prov.get(), "yandex")
@@ -944,6 +964,8 @@ class App(ctk.CTk):
         if cc.get("login"):
             self.c_pwd.delete(0, "end"); self.c_pwd.insert(0, self._cloud_pwd(cc))
         self.to_cloud.set(bool(d.get("to_cloud")))
+        self.direct.set(bool(d.get("direct"))); self.save_pc.set(d.get("save_pc", True) is not False)
+        self._direct_toggle()
         self._cloud_hint()
 
     def _cloud_test(self):
@@ -1010,7 +1032,7 @@ class App(ctk.CTk):
             except Exception: pass
         cfg = dict(host=d.get("host", ""), port=int(d.get("port") or 22), user=d.get("user") or "root",
                    auth=d.get("auth", "password"), pwd=pwd, key=d.get("key", ""), name=n,
-                   dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get(), slim=self.slim.get())
+                   dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get(), slim=self.slim.get(), direct=self.direct.get(), save_pc=self.save_pc.get())
         self.q.put(("log", f"\n===== Сервер «{n}» ====="))
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
@@ -1088,7 +1110,8 @@ class App(ctk.CTk):
         data = self.conn.dump()
         data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump(),
                     servers=self.servers, schedule=self.sched, cloud=getattr(self, "cloudcfg", {}) or {},
-                    to_cloud=self.to_cloud.get(), slim=self.slim.get(), poweroff=self.poweroff.get())
+                    to_cloud=self.to_cloud.get(), slim=self.slim.get(), poweroff=self.poweroff.get(),
+                    direct=self.direct.get(), save_pc=self.save_pc.get())
         CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self):
@@ -1178,7 +1201,7 @@ class App(ctk.CTk):
         if not self.conn.host.get().strip(): return messagebox.showerror("Ошибка", "Укажите IP или хост сервера")
         if not any(v.get() for v in self.opt.values()): return messagebox.showerror("Ошибка", "Выберите, что бэкапить")
         self._begin()
-        cfg = self.conn.cfg(); cfg.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get(), slim=self.slim.get())
+        cfg = self.conn.cfg(); cfg.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get(), slim=self.slim.get(), direct=self.direct.get(), save_pc=self.save_pc.get())
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
     def _stream(self, ssh, cmd, path, label, expect=0):
@@ -1307,7 +1330,7 @@ class App(ctk.CTk):
             (tmp / "os_release.txt").write_text(out, encoding="utf-8")
             L(f"[i] Сервер: {c.get('name') or c['host']}  •  ОС: {osi[0]}")
             names = {"db": "базы данных", "web": "файлы сайтов", "conf": "настройки служб", "pkgs": "список программ"}
-            meta = dict(format=1, app="VPS Backup v4", server_name=c.get("name") or c["host"], host=c["host"],
+            meta = dict(format=1, app=f"VPS Backup v{VERSION}", server_name=c.get("name") or c["host"], host=c["host"],
                         port=c["port"], user=c["user"], hostname=hn, created=time.strftime("%d.%m.%Y %H:%M"),
                         os=osi[0], os_id=osi[1], os_version=osi[2],
                         contents=[v for k, v in names.items() if c["opt"].get(k)], slim=bool(c.get("slim")),
@@ -1318,6 +1341,9 @@ class App(ctk.CTk):
             srv = c.get("name") or hn; keep = self._keep_of(srv)
             try: free = shutil.disk_usage(c["dest"]).free
             except Exception: free = 0
+            if c.get("direct"):
+                self._direct(ssh, c, name, srv, tmp, keep, L)
+                self.q.put(("bar", 1.0)); self.q.put(("done", ("backup", True))); return
             old = self._copies(c["dest"], srv)
             # места мало: заранее удаляем самые старые копии, которые всё равно ушли бы по ротации
             while free and self._need_hi and free < self._need_hi * 1.1 and keep >= 2 and len(old) >= keep:
@@ -1430,6 +1456,113 @@ class App(ctk.CTk):
         if retry:
             if self._wait_net(c, L): self._worker(c, attempt + 1)
             else: L("[■] Бэкап остановлен пользователем."); self.q.put(("done", ("backup", None)))
+
+    def _direct(self, ssh, c, name, srv, tmp, keep, L):
+        """Бэкап собирается на сервере и уходит в облако через rclone, минуя ПК."""
+        cc = dict(self.cloudcfg or {}); prov = cc.get("provider")
+        if prov not in RCLONE_URL:
+            raise Exception("прямая выгрузка с сервера работает с Облаком Mail.ru и Яндекс Диском (выберите их в разделе «Облако»)")
+        pwd = self._cloud_pwd(cc) if cc.get("login") else ""
+        if not pwd: raise Exception("облако не настроено — укажите логин и пароль приложения в разделе «Облако»")
+        q = shlex.quote; W = f"/tmp/vpsb_{name}"; D = f"{W}/{name}"; A = f"{W}/{name}.tar.gz"
+        RC = f"rclone --config {q(W + '/rc.conf')}"
+        folder = "/" + (cc.get("folder") or "/VPS_Backups").strip("/")
+        dst = f"r:{folder}/{name}.tar.gz"
+        L(f"[*] Режим «напрямую в облако»: архив собирается на сервере и уходит в {cloud.PROVIDERS[prov]}")
+        self._exec(ssh, f"rm -rf {q(W)}; mkdir -p {q(D)} && chmod 700 {q(W)}")
+        try:
+            out, _ = self._exec(ssh, f"df -PB1 {q(W)} | awk 'NR==2{{print $4}}'")
+            try:
+                free = int(out.strip() or 0)
+                if self._need_hi and free < self._need_hi:
+                    L(f"[!] ВНИМАНИЕ: на диске сервера свободно {human(free)}, а архив может занять до ~{human(self._need_hi)}")
+            except ValueError: pass
+            sftp = ssh.open_sftp()
+            for p in tmp.iterdir(): sftp.put(str(p), f"{D}/{p.name}")
+            with sftp.open(f"{W}/.pw", "w") as f: f.write(pwd)
+            sftp.chmod(f"{W}/.pw", 0o600)
+            L("[*] Проверяю программу выгрузки (rclone) на сервере...")
+            if self._run_log(ssh, RCLONE_INSTALL) != 0 or self._exec(ssh, "command -v rclone")[1] != 0:
+                raise Exception("не удалось установить rclone на сервер (нужен доступ в интернет и права root)")
+            conf = (f"P=$(rclone obscure - < {q(W + '/.pw')}); rm -f {q(W + '/.pw')}; "
+                    f"printf '[r]\\ntype = webdav\\nurl = %s\\nvendor = other\\nuser = %s\\npass = %s\\n' "
+                    f"{q(RCLONE_URL[prov])} {q(cc['login'])} \"$P\" > {q(W + '/rc.conf')}; chmod 600 {q(W + '/rc.conf')}")
+            if self._exec(ssh, conf)[1] != 0: raise Exception("не удалось настроить rclone")
+            o = c["opt"]
+            if o["db"]:
+                for fn, cmd, lab in (("mysql_all.sql.gz", MYSQL_CMD, "MySQL"), ("postgres_all.sql.gz", PG_CMD, "PostgreSQL")):
+                    L(f"[*] Дамп {lab} на сервере...")
+                    f = q(f"{D}/{fn}")
+                    code = self._run_log(ssh, f"( {cmd} ) > {f} 2>{q(W + '/err')}; r=$?; [ $r -eq 0 ] && gzip -t {f} || {{ rm -f {f}; [ $r -eq 0 ] && r=9; }}; exit $r")
+                    if code == 3: L(f"[-] {lab} не найден")
+                    elif code == 0: L(f"[+] {lab} готово, целостность проверена")
+                    elif code == 9: raise Broken(f"{fn}: дамп на сервере повреждён")
+                    else: L(f"[!] Ошибка дампа {lab}: {self._exec(ssh, 'tail -c 300 ' + q(W + '/err'))[0]}")
+                self.q.put(("bar", 0.25))
+            if o["pkgs"]:
+                for fn, cmd in PKG_CMDS.items():
+                    f = q(f"{D}/{fn}")
+                    self._exec(ssh, f"command -v {cmd.split()[0]} >/dev/null 2>&1 && {cmd} > {f} 2>/dev/null; [ -s {f} ] || rm -f {f}")
+                L("[+] Список пакетов сохранён"); self.q.put(("bar", 0.3))
+            paths = (WEB_PATHS if o["web"] else []) + (CONF_PATHS if o["conf"] else [])
+            if paths:
+                ex = "".join(f"--exclude={q(x)} " for x in (SLIM_EXCLUDES if c.get("slim") else ["*.sock"]))
+                plist = " ".join(q(p) for p in paths); f = q(f"{D}/files.tar.gz")
+                L("[*] Архивация файлов сайтов/конфигураций на сервере (может занять долго)...")
+                self.q.put(("status", "Сервер архивирует файлы...")); self.q.put(("bar", 0.35))
+                code = self._run_log(ssh, f'cd / && P=""; for p in {plist}; do [ -e "/$p" ] && P="$P $p"; done; '
+                                     f'[ -z "$P" ] && exit 5; tar -czf {f} --ignore-failed-read --warning=no-file-changed '
+                                     f'--warning=no-file-ignored {ex}$P 2>/dev/null; r=$?; [ $r -le 1 ] && {{ gzip -t {f} || exit 9; }}; exit $r')
+                if code == 5: L("[-] Папки не найдены")
+                elif code in (0, 1): L("[+] Файлы упакованы, целостность проверена")
+                elif code == 9: raise Broken("архив файлов на сервере повреждён")
+                else: raise Broken(f"архивация на сервере завершилась с ошибкой (код {code})")
+            L("[*] Упаковка в один файл на сервере..."); self.q.put(("bar", 0.6))
+            code = self._run_log(ssh, f"cd {q(W)} && tar -cf - {q(name + '/backup_meta.json')} {q(name + '/os_release.txt')} "
+                                 f"$(ls -1 {q(name)} | grep -v -e '^backup_meta.json$' -e '^os_release.txt$' | sed 's|^|{name}/|') "
+                                 f"| gzip -1 > {q(A)} && gzip -t {q(A)} && rm -rf {q(D)}")
+            if code != 0: raise Broken("не удалось собрать итоговый архив на сервере (мало места на диске сервера?)")
+            size = int(self._exec(ssh, f"stat -c %s {q(A)}")[0].strip() or 0)
+            L(f"[✓] Архив на сервере готов и проверен: {name}.tar.gz ({human(size)})")
+            L(f"[*] Загрузка с сервера в {cloud.PROVIDERS[prov]}: {folder}/{name}.tar.gz")
+            self.q.put(("status", "Сервер загружает архив в облако...")); self.q.put(("bar", 0.7))
+            code = self._run_log(ssh, f"{RC} mkdir {q('r:' + folder)} 2>/dev/null; {RC} copyto {q(A)} {q(dst)} "
+                                 "--retries 5 --low-level-retries 20 --stats 10s --stats-one-line -v 2>&1 | grep -v DEBUG; exit ${PIPESTATUS[0]}")
+            if code != 0: raise Exception("загрузка в облако не удалась (см. строки rclone выше)")
+            rs = self._exec(ssh, f"{RC} size --json {q(dst)}")[0]
+            try:
+                if json.loads(rs).get("bytes") != size: raise Broken("в облаке размер файла не совпал с архивом — загрузите заново")
+            except ValueError: pass
+            L(f"[✓] В облаке: {folder}/{name}.tar.gz ({human(size)}) — размер сверен")
+            ck = int(cc.get("keep", 5) or 0)
+            if ck:
+                pre = f"vps_backup_{safe_name(srv)}_"
+                ls = [x for x in self._exec(ssh, f"{RC} lsf --files-only {q('r:' + folder)}")[0].split()
+                      if x.startswith(pre) and x.endswith(".tar.gz")]
+                for x in sorted(ls)[:-ck]:
+                    if self._exec(ssh, f"{RC} deletefile {q('r:' + folder + '/' + x)}")[1] == 0:
+                        L(f"[i] Из облака удалена старая копия {x}")
+            if c.get("save_pc", True):
+                L("[*] Скачиваю копию на компьютер...")
+                part = Path(c["dest"]) / (name + ".tar.gz.writing"); fin = Path(c["dest"]) / (name + ".tar.gz")
+                def cb(d, t):
+                    if self.cancel.is_set(): raise Cancelled()
+                    self.q.put(("bar", 0.75 + 0.2 * d / max(t, 1)))
+                    self.q.put(("status", f"На компьютер: {d/1048576:.0f} из {t/1048576:.0f} МБ"))
+                try:
+                    sftp.get(A, str(part), callback=cb)
+                    ok, msg = verify_archive(part, self.cancel)
+                    if not ok: raise Broken(msg)
+                    os.replace(part, fin)
+                finally:
+                    if part.exists(): part.unlink()
+                L(f"[✓] Копия на компьютере: {fin} — {msg}")
+                self._rotate(c["dest"], srv, keep, L, protect=fin)
+            else:
+                L("[i] Копия на компьютер не сохранялась (так выбрано в разделе «Облако»)")
+        finally:
+            try: self._exec(ssh, f"rm -rf {q(W)}"); L("[i] Временные файлы на сервере удалены")
+            except Exception: pass
 
     # ---------- restore ----------
     def restore(self, check_only=False):
