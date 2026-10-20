@@ -23,6 +23,7 @@ jobs:
       - name: Build EXE
         run: >
           pyinstaller --onefile --noconsole --name VPSBackup
+          --icon icon.ico --add-data "icon.ico;."
           --collect-all customtkinter
           --hidden-import keyring.backends.Windows
           vps_backup.py
