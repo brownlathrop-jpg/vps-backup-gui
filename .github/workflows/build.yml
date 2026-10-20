@@ -9,6 +9,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      APP_BUILD: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,17 +20,30 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
-      - name: Build EXE
+      - name: Build program folder (onedir)
         run: >
-          pyinstaller --onefile --noconsole --name VPSBackup
-          --icon icon.ico --add-data "icon.ico;." --splash splash.png
+          pyinstaller --onedir --noconsole --noupx --name VPSBackup
+          --icon icon.ico --add-data "icon.ico;."
           --collect-all customtkinter
           --hidden-import keyring.backends.Windows --hidden-import cloud
           vps_backup.py
+      - name: Portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path dist\VPSBackup\* -DestinationPath dist\VPSBackup-portable.zip
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: VPS Backup build ${{ github.run_number }}
-          body: "Автоматическая сборка из коммита ${{ github.sha }}. Скачайте VPSBackup.exe ниже."
-          files: dist/VPSBackup.exe
+          body: |
+            Сборка из коммита ${{ github.sha }}.
+            • VPSBackup-Setup.exe — установщик (рекомендуется)
+            • VPSBackup-portable.zip — без установки: распакуйте и запустите VPSBackup.exe
+          files: |
+            dist/VPSBackup-Setup.exe
+            dist/VPSBackup-portable.zip
