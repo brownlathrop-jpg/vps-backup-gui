@@ -479,6 +479,7 @@ class App(ctk.CTk):
         self.chan = None
         self.archive_os = None
         self._ui()
+        self._google_creds_load()
         self.load()
         self.after(100, self._poll)
         self.after(5000, self._sched_tick)
@@ -493,7 +494,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.6", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.8", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
@@ -768,6 +769,16 @@ class App(ctk.CTk):
         ctk.CTkLabel(r, text="Хранить последних копий каждого сервера:", text_color=MUTED).pack(side="left")
         self.c_keep = entry(r, width=60); self.c_keep.insert(0, "5"); self.c_keep.pack(side="left", padx=8)
         ctk.CTkLabel(r, text="(старые удаляются сами, 0 — не удалять)", text_color=MUTED).pack(side="left")
+        self.g_row = ctk.CTkFrame(c, fg_color="transparent")
+        gr = ctk.CTkFrame(self.g_row, fg_color="transparent"); gr.pack(fill="x", padx=16, pady=(4, 0))
+        gr.columnconfigure(1, weight=1)
+        ctk.CTkLabel(gr, text="Client ID:", text_color=MUTED).grid(row=0, column=0, sticky="w", pady=3, padx=(0, 10))
+        self.g_cid = entry(gr); self.g_cid.grid(row=0, column=1, sticky="ew", pady=3)
+        ctk.CTkLabel(gr, text="Client Secret:", text_color=MUTED).grid(row=1, column=0, sticky="w", pady=3, padx=(0, 10))
+        self.g_secret = entry(gr, show="•"); self.g_secret.grid(row=1, column=1, sticky="ew", pady=3)
+        gr2 = ctk.CTkFrame(self.g_row, fg_color="transparent"); gr2.pack(fill="x", padx=16, pady=4)
+        btn(gr2, "💾  Сохранить коды Google", self._google_creds_save, primary=False).pack(side="left")
+        self.g_stat = ctk.CTkLabel(gr2, text="", text_color=MUTED); self.g_stat.pack(side="left", padx=8)
         self.c_hint = ctk.CTkLabel(c, text="", justify="left", anchor="w", text_color=TXT, fg_color=SOFT,
                                    corner_radius=8, wraplength=780)
         self.c_hint.pack(fill="x", padx=16, pady=8, ipady=8, ipadx=8)
@@ -783,7 +794,8 @@ class App(ctk.CTk):
 
     def _google_login(self):
         if not cloud.google_ready():
-            return messagebox.showinfo("Google Диск", "Google Диск появится в следующей версии программы.")
+            return messagebox.showinfo("Google Диск", "Сначала вставьте коды приложения в поля «Client ID» и "
+                                       "«Client Secret» выше, нажмите «Сохранить коды Google», затем «Войти через Google».")
         self.c_stat.configure(text="Открыл окно Google в браузере — разрешите доступ...", text_color=MUTED)
         def job():
             try:
@@ -804,12 +816,18 @@ class App(ctk.CTk):
         if hasattr(self, "g_btn"):
             if g: self.g_btn.pack(side="left", padx=(0, 8), before=self.g_btn.master.winfo_children()[1])
             else: self.g_btn.pack_forget()
+        if hasattr(self, "g_row"):
+            if g: self.g_row.pack(fill="x", before=self.c_hint)
+            else: self.g_row.pack_forget()
         for w in (self.c_login, self.c_pwd):
             w.configure(state="disabled" if g else "normal")
         if g:
-            t = ("Как подключить (30 секунд):\n1. Нажмите «Войти через Google» — откроется браузер.\n"
-                 "2. Выберите аккаунт и нажмите «Разрешить». Если Google напишет «Приложение не проверено» — "
-                 "«Дополнительно» → «Перейти в VPS Backup».\nПрограмма видит только свои файлы на Диске. "
+            t = ("Как подключить (один раз, ~5 минут):\n1. console.cloud.google.com → создайте проект → «API и сервисы» "
+                 "→ «Библиотека» → включите Google Drive API.\n2. «Экран согласия OAuth» → External → добавьте свою почту "
+                 "как тестового пользователя.\n3. «Учётные данные» → «Создать учётные данные» → «ID клиента OAuth» → "
+                 "«Приложение для компьютера».\n4. Скопируйте Client ID и Client Secret в поля выше → «Сохранить коды "
+                 "Google».\n5. Нажмите «Войти через Google» и разрешите доступ. Если Google напишет «Приложение не "
+                 "проверено» — «Дополнительно» → «Перейти в VPS Backup».\nПрограмма видит только свои файлы на Диске. "
                  "Бесплатно 15 ГБ (общие с Gmail и Фото). При обрыве связи загрузка продолжается с того же места.")
             self.c_hint.configure(text=t); return
         if self._cloud_key() == "yandex":
@@ -831,6 +849,39 @@ class App(ctk.CTk):
         if not keyring: return ""
         try: return keyring.get_password(APP, f"cloud:{cc['provider']}:{cc['login']}") or ""
         except Exception: return ""
+
+    def _google_creds_load(self):
+        raw = ""
+        if keyring:
+            try: raw = keyring.get_password(APP, "google_oauth") or ""
+            except Exception: raw = ""
+        if not raw:
+            try:
+                f = CFG_DIR / "google_oauth.json"
+                if f.exists(): raw = f.read_text(encoding="utf-8")
+            except Exception: raw = ""
+        try: d = json.loads(raw) if raw else {}
+        except Exception: d = {}
+        cloud.set_google_credentials(d.get("client_id", ""), d.get("client_secret", ""))
+        for e, k in ((self.g_cid, "client_id"), (self.g_secret, "client_secret")):
+            if d.get(k) and not e.get(): e.insert(0, d[k])
+
+    def _google_creds_save(self):
+        cid, cs = self.g_cid.get().strip(), self.g_secret.get().strip()
+        if not cid or not cs:
+            return messagebox.showerror("Google Диск", "Заполните оба поля: Client ID и Client Secret.")
+        cloud.set_google_credentials(cid, cs)
+        raw = json.dumps({"client_id": cid, "client_secret": cs})
+        if keyring:
+            try: keyring.set_password(APP, "google_oauth", raw)
+            except Exception: pass
+        else:
+            try:
+                CFG_DIR.mkdir(parents=True, exist_ok=True)
+                (CFG_DIR / "google_oauth.json").write_text(raw, encoding="utf-8")
+            except Exception: pass
+        self.g_stat.configure(text="✓ Коды сохранены — теперь нажмите «Войти через Google»", text_color=OK)
+
 
     def _cloud_save(self, quiet=False):
         cc = self._cloud_cfg(); pwd = self.c_pwd.get()

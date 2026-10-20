@@ -154,8 +154,10 @@ class MailRu:
 
 
 # ---------------- Google Диск ----------------
-# Коды приложения из Google Cloud Console (тип «Приложение для компьютера»).
-# Для настольных программ Google не считает их секретными: доступ даёт только согласие пользователя.
+# Коды приложения (Client ID и Client Secret) пользователь вставляет сам в настройках
+# программы (вкладка «Облако»). Взять их можно в Google Cloud Console: ID клиента OAuth,
+# тип «Приложение для компьютера». Для настольных программ Google не считает Client Secret
+# секретным: доступ даёт только согласие пользователя.
 GOOGLE_CLIENT_ID = ""
 GOOGLE_CLIENT_SECRET = ""
 G_SCOPE = "https://www.googleapis.com/auth/drive.file openid email"
@@ -163,6 +165,13 @@ G_API = "https://www.googleapis.com/drive/v3"
 G_UP = "https://www.googleapis.com/upload/drive/v3/files"
 G_FOLDER = "application/vnd.google-apps.folder"
 CHUNK = 8 * 1024 * 1024
+
+
+def set_google_credentials(client_id, client_secret):
+    """Задаёт коды приложения Google (вводятся в самой программе, без правки кода)."""
+    global GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+    GOOGLE_CLIENT_ID = (client_id or "").strip()
+    GOOGLE_CLIENT_SECRET = (client_secret or "").strip()
 
 
 def google_ready():
@@ -175,7 +184,7 @@ def google_login(timeout=300):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlencode, urlparse, parse_qs
     if not google_ready():
-        raise CloudError("Google Диск ещё не подключён в этой версии программы")
+        raise CloudError("Не заданы коды Google — вставьте Client ID и Client Secret в настройках облака")
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     state = secrets.token_urlsafe(16); got = {}
@@ -225,7 +234,7 @@ def google_login(timeout=300):
 
 class GDrive:
     def __init__(self, login, refresh_token):
-        if not google_ready(): raise CloudError("Google Диск ещё не подключён в этой версии программы")
+        if not google_ready(): raise CloudError("Не заданы коды Google — вставьте Client ID и Client Secret в настройках облака")
         self.rt = refresh_token; self.s = requests.Session(); self._token()
 
     def _token(self):
