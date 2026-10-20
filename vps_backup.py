@@ -58,6 +58,48 @@ PKG_CMDS = {"packages_dpkg.txt": "dpkg --get-selections", "packages_manual.txt":
 
 
 
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def autostart_cmd():
+    if getattr(sys, "frozen", False): return f'"{sys.executable}" --tray'
+    return f'"{sys.executable}" "{Path(__file__).resolve()}" --tray'
+
+
+def set_autostart(on):
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on: winreg.SetValueEx(k, APP, 0, winreg.REG_SZ, autostart_cmd())
+        else:
+            try: winreg.DeleteValue(k, APP)
+            except FileNotFoundError: pass
+
+
+def get_autostart():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, APP); return True
+    except Exception: return False
+
+
+def parse_hhmm(t):
+    h, m = (t or "").strip().replace(".", ":").split(":")
+    h, m = int(h), int(m)
+    if not (0 <= h < 24 and 0 <= m < 60): raise ValueError
+    return h, m
+
+
+def is_due(now, hhmm, days, last_run):
+    """Пора ли запускать: нужный день недели, время наступило (в пределах 6 ч), сегодня ещё не запускали."""
+    if now.weekday() not in days: return False
+    h, m = parse_hhmm(hhmm)
+    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if not (target <= now < target + __import__("datetime").timedelta(hours=6)): return False
+    return last_run != now.strftime("%Y-%m-%d")
+
+
 class Cancelled(Exception):
     pass
 
@@ -260,7 +302,7 @@ class App(ctk.CTk):
             ico = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "icon.ico"
             if ico.exists(): self.iconbitmap(str(ico))
         except Exception: pass
-        self.servers = {}
+        self.servers = {}; self.sched = {}; self.sched_queue = []; self.auto_mode = False
         self.q = queue.Queue()
         self.busy = False
         self.cancel = threading.Event()
@@ -269,6 +311,8 @@ class App(ctk.CTk):
         self._ui()
         self.load()
         self.after(100, self._poll)
+        self.after(5000, self._sched_tick)
+        if "--tray" in sys.argv: self.after(200, self.iconify)
 
     def _ui(self):
         # ----- шапка -----
@@ -284,6 +328,8 @@ class App(ctk.CTk):
                                    text_color=TXT, corner_radius=10)
         self.tabs.pack(fill="x", padx=12)
         tb = self.tabs.add("  Создать бэкап  "); tr = self.tabs.add("  Восстановить на сервер  ")
+        ts = self.tabs.add("  Расписание  ")
+        self._sched_ui(ts)
 
         # ----- вкладка бэкапа -----
         self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", pady=(0, 8))
@@ -342,6 +388,118 @@ class App(ctk.CTk):
         for tag, col in (("ok", OK), ("warn", WARN), ("err", ERR), ("info", ACCENT)):
             self.log.tag_config(tag, foreground=col)
 
+    def _sched_ui(self, ts):
+        c = card(ts, "Автоматический бэкап по расписанию"); c.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(c, text="Программа сама начнёт бэкап в выбранное время, если она запущена (можно свернуть). "
+                     "Пароли берутся из сохранённого списка серверов.", text_color=MUTED, wraplength=800,
+                     justify="left").pack(anchor="w", padx=14, pady=(0, 8))
+        self.s_on = ctk.BooleanVar(value=False)
+        chk(c, "Включить бэкап по расписанию", self.s_on).pack(anchor="w", padx=16, pady=4)
+        r = ctk.CTkFrame(c, fg_color="transparent"); r.pack(fill="x", padx=16, pady=6)
+        ctk.CTkLabel(r, text="Время (ЧЧ:ММ):", text_color=MUTED).pack(side="left")
+        self.s_time = entry(r, width=80); self.s_time.insert(0, "03:00"); self.s_time.pack(side="left", padx=8)
+        ctk.CTkLabel(r, text="Дни:", text_color=MUTED).pack(side="left", padx=(16, 6))
+        self.s_days = [ctk.BooleanVar(value=True) for _ in DAYS]
+        for i, d in enumerate(DAYS):
+            ctk.CTkCheckBox(r, text=d, variable=self.s_days[i], width=52, text_color=TXT, fg_color=ACCENT,
+                            hover_color=ACCENT_H, checkbox_width=18, checkbox_height=18).pack(side="left")
+        ctk.CTkLabel(c, text="Какие серверы бэкапить:", text_color=MUTED).pack(anchor="w", padx=16, pady=(8, 2))
+        self.s_list = ctk.CTkFrame(c, fg_color=SOFT, corner_radius=8); self.s_list.pack(fill="x", padx=16, pady=(0, 6))
+        self.s_srv = {}
+        self.s_info = ctk.CTkLabel(c, text="", text_color=MUTED); self.s_info.pack(anchor="w", padx=16, pady=(0, 6))
+        b = ctk.CTkFrame(c, fg_color="transparent"); b.pack(fill="x", padx=16, pady=(0, 12))
+        btn(b, "💾  Сохранить расписание", self._sched_save, width=200).pack(side="left")
+        btn(b, "▶  Проверить сейчас", lambda: self._sched_fire(manual=True), primary=False).pack(side="left", padx=8)
+        ctk.CTkLabel(c, text="Что сохранять и в какую папку — берётся с вкладки «Создать бэкап».",
+                     text_color=MUTED).pack(anchor="w", padx=16, pady=(0, 10))
+
+        a = card(ts, "Запуск вместе с Windows"); a.pack(fill="x", pady=(0, 8))
+        self.auto = ctk.BooleanVar(value=get_autostart())
+        chk(a, "Запускать программу при входе в Windows (свёрнутой)", self.auto).pack(anchor="w", padx=16, pady=4)
+        self.auto.trace_add("write", lambda *_: self._toggle_autostart())
+        ctk.CTkLabel(a, text="Чтобы бэкап по расписанию срабатывал, компьютер должен быть включён в это время.",
+                     text_color=MUTED).pack(anchor="w", padx=16, pady=(0, 12))
+
+    def _sched_servers(self):
+        for w in self.s_list.winfo_children(): w.destroy()
+        prev = {k: v.get() for k, v in self.s_srv.items()}
+        chosen = set(self.sched.get("servers", []))
+        self.s_srv = {}
+        if not self.servers:
+            ctk.CTkLabel(self.s_list, text="Список пуст — сохраните сервер кнопкой «💾 Сохранить» на вкладке бэкапа",
+                         text_color=WARN).pack(anchor="w", padx=10, pady=8); return
+        for n in sorted(self.servers, key=str.lower):
+            v = ctk.BooleanVar(value=prev.get(n, n in chosen)); self.s_srv[n] = v
+            h = self.servers[n].get("host", "")
+            chk(self.s_list, f"{n}  ({h})" if h and h != n else n, v).pack(anchor="w", padx=10, pady=4)
+
+    def _sched_load(self, d):
+        self.sched = d.get("schedule", {}) or {}
+        self.s_on.set(bool(self.sched.get("on")))
+        self.s_time.delete(0, "end"); self.s_time.insert(0, self.sched.get("time", "03:00"))
+        days = self.sched.get("days", list(range(7)))
+        for i, v in enumerate(self.s_days): v.set(i in days)
+        self._sched_servers(); self._sched_info()
+
+    def _sched_save(self):
+        try: parse_hhmm(self.s_time.get())
+        except Exception: return messagebox.showerror("Ошибка", "Время укажите в виде ЧЧ:ММ, например 03:00")
+        servers = [n for n, v in self.s_srv.items() if v.get()]
+        if self.s_on.get() and not servers: return messagebox.showerror("Ошибка", "Отметьте хотя бы один сервер")
+        self.sched.update(on=self.s_on.get(), time=self.s_time.get().strip(), servers=servers,
+                          days=[i for i, v in enumerate(self.s_days) if v.get()])
+        self.save(); self._sched_info()
+        self.q.put(("log", "[+] Расписание сохранено" if self.s_on.get() else "[i] Расписание выключено"))
+
+    def _sched_info(self):
+        sc = self.sched
+        if not sc.get("on"): t = "Расписание выключено"
+        else:
+            t = f"Включено: в {sc.get('time')} ({', '.join(DAYS[i] for i in sc.get('days', []))}), " \
+                f"серверов: {len(sc.get('servers', []))}"
+            if sc.get("last"): t += f"  •  последний запуск: {sc['last']}"
+        self.s_info.configure(text=t, text_color=OK if sc.get("on") else MUTED)
+
+    def _toggle_autostart(self):
+        try: set_autostart(self.auto.get())
+        except Exception as e: messagebox.showerror("Ошибка", f"Не удалось изменить автозапуск: {e}")
+
+    def _sched_tick(self):
+        try:
+            import datetime
+            sc = self.sched
+            if sc.get("on") and not self.busy and \
+                    is_due(datetime.datetime.now(), sc.get("time", "03:00"), sc.get("days", []), sc.get("last_day")):
+                self._sched_fire()
+        except Exception as e:
+            self.q.put(("log", f"[!] Ошибка расписания: {e}"))
+        self.after(30000, self._sched_tick)
+
+    def _sched_fire(self, manual=False):
+        if self.busy: return
+        names = [n for n in self.sched.get("servers", []) if n in self.servers] if not manual else \
+            [n for n, v in self.s_srv.items() if v.get()]
+        if not names:
+            if manual: messagebox.showerror("Ошибка", "Отметьте серверы для расписания")
+            return
+        self.sched["last_day"] = time.strftime("%Y-%m-%d"); self.sched["last"] = time.strftime("%d.%m.%Y %H:%M")
+        self.save(); self._sched_info()
+        self.sched_queue = list(names); self.auto_mode = True
+        self._begin(); self.q.put(("log", f"[i] Бэкап по расписанию: {', '.join(names)}"))
+        self._sched_next()
+
+    def _sched_next(self):
+        n = self.sched_queue.pop(0)
+        d = dict(self.servers[n]); pwd = ""
+        if keyring:
+            try: pwd = keyring.get_password(APP, f"{d.get('user')}@{d.get('host')}:{d.get('port')}") or ""
+            except Exception: pass
+        cfg = dict(host=d.get("host", ""), port=int(d.get("port") or 22), user=d.get("user") or "root",
+                   auth=d.get("auth", "password"), pwd=pwd, key=d.get("key", ""), name=n,
+                   dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()})
+        self.q.put(("log", f"\n===== Сервер «{n}» ====="))
+        threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
+
     def _pick_dir(self):
         p = filedialog.askdirectory()
         if p: self.dest.delete(0, "end"); self.dest.insert(0, p)
@@ -389,13 +547,13 @@ class App(ctk.CTk):
 
     # ---------- settings ----------
     def save_servers(self):
-        self.save(); self.conn.refresh(); self.rconn.refresh()
+        self.save(); self.conn.refresh(); self.rconn.refresh(); self._sched_servers()
 
     def save(self):
         CFG_DIR.mkdir(parents=True, exist_ok=True)
         data = self.conn.dump()
         data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump(),
-                    servers=self.servers)
+                    servers=self.servers, schedule=self.sched)
         CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self):
@@ -411,6 +569,7 @@ class App(ctk.CTk):
         self.dest.delete(0, "end"); self.dest.insert(0, d.get("dest", str(Path.home() / "VPS_Backups")))
         for k, v in d.get("opt", {}).items():
             if k in self.opt: self.opt[k].set(v)
+        self._sched_load(d)
 
     # ---------- общее ----------
     def _begin(self):
@@ -721,6 +880,15 @@ class App(ctk.CTk):
                 elif k == "status": self.status.configure(text=v)
                 elif k == "done":
                     kind, ok = v
+                    if self.auto_mode and kind == "backup":
+                        if ok is not None and self.sched_queue:
+                            self._sched_next(); continue
+                        self.auto_mode = False; self.sched_queue = []
+                        self.busy = False
+                        for w in (self.start, self.openb, self.rstart, self.checkb): w.configure(state="normal")
+                        self.stopb.configure(state="disabled")
+                        self.status.configure(text="Бэкап по расписанию завершён" if ok is not None else "Остановлено")
+                        continue
                     self.busy = False
                     for w in (self.start, self.openb, self.rstart, self.checkb): w.configure(state="normal")
                     self.stopb.configure(state="disabled")
