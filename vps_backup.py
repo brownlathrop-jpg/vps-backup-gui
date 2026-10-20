@@ -214,20 +214,20 @@ def card(master, title=None):
     f = ctk.CTkFrame(master, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=14)
     if title:
         ctk.CTkLabel(f, text=title, font=ctk.CTkFont(FONT, 15, "bold"), text_color=TXT
-                     ).pack(anchor="w", padx=18, pady=(14, 4))
+                     ).pack(anchor="w", padx=16, pady=(10, 2))
     return f
 
 
 def btn(master, text, cmd, primary=True, **kw):
     if primary:
-        return ctk.CTkButton(master, text=text, command=cmd, height=38, corner_radius=10, fg_color=ACCENT,
+        return ctk.CTkButton(master, text=text, command=cmd, height=32, corner_radius=8, fg_color=ACCENT,
                              hover_color=ACCENT_H, text_color="#FFFFFF", font=ctk.CTkFont(FONT, 13, "bold"), **kw)
-    return ctk.CTkButton(master, text=text, command=cmd, height=38, corner_radius=10, fg_color=SOFT, hover_color=SOFT_H,
+    return ctk.CTkButton(master, text=text, command=cmd, height=32, corner_radius=8, fg_color=SOFT, hover_color=SOFT_H,
                          text_color=TXT, font=ctk.CTkFont(FONT, 13), border_width=0, **kw)
 
 
 def entry(master, **kw):
-    return ctk.CTkEntry(master, height=36, corner_radius=10, fg_color="#FAFBFE", border_color=BORDER,
+    return ctk.CTkEntry(master, height=30, corner_radius=8, fg_color="#FAFBFE", border_color=BORDER,
                         text_color=TXT, font=ctk.CTkFont(FONT, 13), **kw)
 
 
@@ -246,7 +246,7 @@ class ConnForm(ctk.CTkFrame):
         self.app = app
         self.columnconfigure(1, weight=1)
         ctk.CTkLabel(self, text=title, font=ctk.CTkFont(FONT, 15, "bold"), text_color=TXT
-                     ).grid(row=0, column=0, columnspan=3, sticky="w", padx=18, pady=(14, 6))
+                     ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
         self.r = 1
         pf = ctk.CTkFrame(self, fg_color="transparent")
         self.prof = ctk.CTkComboBox(pf, values=[self.NEW], state="readonly", command=self._pick_profile, height=32,
@@ -257,25 +257,33 @@ class ConnForm(ctk.CTkFrame):
         btn(pf, "💾 Сохранить", self._save_profile, width=110).pack(side="left", padx=(6, 0))
         btn(pf, "🗑", self._del_profile, primary=False, width=40).pack(side="left", padx=(6, 0))
         self.row("Сервер:", pf)
-        self.name = self.row("Название:", entry(self, placeholder_text="например: Магазин"))
-        self.host = self.row("IP / хост:", entry(self))
+        nh = ctk.CTkFrame(self, fg_color="transparent")
+        self.name = entry(nh, placeholder_text="например: Магазин"); self.name.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(nh, text="IP / хост:", text_color=MUTED).pack(side="left", padx=(12, 6))
+        self.host = entry(nh); self.host.pack(side="left", fill="x", expand=True)
+        self.row("Название:", nh)
         hp = ctk.CTkFrame(self, fg_color="transparent")
         self.port = entry(hp, width=80); self.port.insert(0, "22"); self.port.pack(side="left")
         ctk.CTkLabel(hp, text="Пользователь:", text_color=MUTED).pack(side="left", padx=(14, 6))
-        self.user = entry(hp); self.user.insert(0, "root"); self.user.pack(side="left", fill="x", expand=True)
-        self.row("Порт:", hp)
+        self.user = entry(hp, width=140); self.user.insert(0, "root"); self.user.pack(side="left")
+        ctk.CTkLabel(hp, text="Вход:", text_color=MUTED).pack(side="left", padx=(14, 6))
         self.auth = ctk.StringVar(value="password")
-        self.authsw = ctk.CTkSegmentedButton(self, values=["Пароль", "SSH-ключ"], command=self._auth_sw, height=30,
+        self.authsw = ctk.CTkSegmentedButton(hp, values=["Пароль", "SSH-ключ"], command=self._auth_sw, height=30,
                                              selected_color=ACCENT, selected_hover_color=ACCENT_H,
                                              unselected_color=SOFT, unselected_hover_color=SOFT_H, text_color=TXT,
                                              fg_color=SOFT)
-        self.authsw.set("Пароль"); self.row("Вход:", self.authsw, sticky="w")
-        self.pwd = self.row("Пароль / фраза:", entry(self, show="•"))
-        kf = ctk.CTkFrame(self, fg_color="transparent")
+        self.authsw.set("Пароль"); self.authsw.pack(side="left")
+        self.row("Порт:", hp)
+        self.pwd_lbl = ctk.CTkLabel(self, text="Пароль:", text_color=MUTED)
+        self.pwd_lbl.grid(row=self.r, column=0, sticky="w", padx=(14, 8), pady=3)
+        self.pwd = entry(self, show="•"); self.pwd.grid(row=self.r, column=1, columnspan=2, sticky="ew", padx=(0, 14), pady=3)
+        self.kf = kf = ctk.CTkFrame(self, fg_color="transparent")
         self.key = entry(kf); self.key.pack(side="left", fill="x", expand=True)
         self.keybtn = btn(kf, "Обзор", self._pick_key, primary=False, width=70); self.keybtn.pack(side="left", padx=(6, 0))
-        self.row("Файл ключа:", kf)
-        self.r += 1; ctk.CTkFrame(self, height=6, fg_color="transparent").grid(row=self.r, column=0)
+        kf.grid(row=self.r, column=1, columnspan=2, sticky="ew", padx=(0, 14), pady=3)
+        self.kpwd = entry(kf, show="•", width=150, placeholder_text="фраза (если есть)"); self.kpwd.pack(side="left", padx=(6, 0))
+        self.kpwd.bind("<KeyRelease>", lambda e: (self.pwd.delete(0, "end"), self.pwd.insert(0, self.kpwd.get())))
+        self.r += 1; ctk.CTkFrame(self, height=4, fg_color="transparent").grid(row=self.r, column=0)
         self._auth()
 
     def row(self, label, w, sticky="ew"):
@@ -289,7 +297,12 @@ class ConnForm(ctk.CTkFrame):
     def _auth(self):
         k = self.auth.get() == "key"
         self.authsw.set("SSH-ключ" if k else "Пароль")
-        self.key.configure(state="normal" if k else "disabled"); self.keybtn.configure(state="normal" if k else "disabled")
+        self.pwd_lbl.configure(text="Файл ключа:" if k else "Пароль:")
+        if k:
+            self.pwd.grid_remove(); self.kf.grid()
+            self.kpwd.delete(0, "end"); self.kpwd.insert(0, self.pwd.get())
+        else:
+            self.kf.grid_remove(); self.pwd.grid()
 
     def _pick_key(self):
         p = filedialog.askopenfilename(title="SSH-ключ")
@@ -409,12 +422,12 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.3", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.4", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
-        self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 24, "bold"), text_color=TXT)
-        self.page_title.pack(anchor="w", padx=28, pady=(22, 0))
+        self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
+        self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
         self.page_sub = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 13), text_color=MUTED)
-        self.page_sub.pack(anchor="w", padx=28, pady=(0, 8))
+        self.page_sub.pack(anchor="w", padx=28, pady=(0, 4))
         host = ctk.CTkFrame(main, fg_color="transparent"); host.pack(fill="both", expand=True, padx=16)
         self.pages, self.navb = {}, {}
         pages = [("backup", "💾   Создать бэкап", "Резервная копия сервера на ваш компьютер"),
@@ -437,62 +450,66 @@ class App(ctk.CTk):
         self._cloud_ui(self.pages["cloud"][0])
 
         # ----- вкладка бэкапа -----
-        self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", padx=12, pady=(0, 12))
-        c = card(tb, "Что сохранить"); c.pack(fill="x", padx=12, pady=(0, 12))
+        self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", padx=12, pady=(0, 8))
+        c = card(tb, "Что сохранить"); c.pack(fill="x", padx=12, pady=(0, 8))
         g = ctk.CTkFrame(c, fg_color="transparent"); g.pack(fill="x", padx=12, pady=(2, 6))
         g.columnconfigure((0, 1), weight=1)
         self.opt = {k: ctk.BooleanVar(value=True) for k in ("db", "web", "conf", "pkgs")}
         for i, (k, t) in enumerate([("db", "🗄  Базы данных (MySQL / PostgreSQL)"), ("web", "🌐  Файлы сайтов (/var/www, /home)"),
                                     ("conf", "⚙  Настройки служб (nginx, cron…)"), ("pkgs", "📦  Список программ")]):
-            chk(g, t, self.opt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=5)
-        df = ctk.CTkFrame(c, fg_color="transparent"); df.pack(fill="x", padx=14, pady=(0, 12))
+            chk(g, t, self.opt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=3)
+        df = ctk.CTkFrame(c, fg_color="transparent"); df.pack(fill="x", padx=14, pady=(0, 6))
         ctk.CTkLabel(df, text="Папка:", text_color=MUTED).pack(side="left", padx=(0, 8))
         self.dest = entry(df); self.dest.pack(side="left", fill="x", expand=True)
         btn(df, "Обзор", self._pick_dir, primary=False, width=70).pack(side="left", padx=(6, 0))
         self.to_cloud = ctk.BooleanVar(value=False)
-        chk(c, "☁  Дублировать в облако (настройка — в разделе «Облако»)", self.to_cloud).pack(anchor="w", padx=16, pady=(0, 12))
+        chk(c, "☁  Дублировать в облако (настройка — в разделе «Облако»)", self.to_cloud).pack(anchor="w", padx=16, pady=(0, 10))
         b = ctk.CTkFrame(tb, fg_color="transparent"); b.pack(fill="x", padx=12, pady=(0, 8))
         self.start = btn(b, "▶  Начать бэкап", self.run, width=180); self.start.pack(side="left")
         self.openb = btn(b, "📂  Открыть папку с бэкапами", self.open_dir, primary=False, state="disabled")
         self.openb.pack(side="left", padx=8)
 
         # ----- вкладка восстановления -----
-        af = card(tr, "Файл бэкапа"); af.pack(fill="x", padx=12, pady=(0, 12))
+        af = card(tr, "Файл бэкапа"); af.pack(fill="x", padx=12, pady=(0, 8))
         r = ctk.CTkFrame(af, fg_color="transparent"); r.pack(fill="x", padx=14, pady=(2, 6))
         self.arch = entry(r); self.arch.pack(side="left", fill="x", expand=True)
         btn(r, "Обзор", self._pick_archive, primary=False, width=70).pack(side="left", padx=(6, 0))
         self.oslbl = ctk.CTkLabel(af, text="Выберите файл — программа покажет, с какого он сервера", justify="left",
                                   anchor="w", text_color=MUTED, fg_color=SOFT, corner_radius=8)
-        self.oslbl.pack(fill="x", padx=14, pady=(0, 12), ipady=8, ipadx=8)
-        self.rconn = ConnForm(tr, self, "Новый сервер (куда разворачивать)"); self.rconn.pack(fill="x", padx=12, pady=(0, 12))
-        rc = card(tr, "Что восстановить"); rc.pack(fill="x", padx=12, pady=(0, 12))
+        self.oslbl.pack(fill="x", padx=14, pady=(0, 8), ipady=4, ipadx=8)
+        self.rconn = ConnForm(tr, self, "Новый сервер (куда разворачивать)"); self.rconn.pack(fill="x", padx=12, pady=(0, 8))
+        rc = card(tr, "Что восстановить"); rc.pack(fill="x", padx=12, pady=(0, 8))
         self.ropt = {k: ctk.BooleanVar(value=v) for k, v in (("clp", False), ("web", True), ("conf", True), ("db", True))}
         for k, t in [("clp", "🧩  Чистый сервер: сначала установить CloudPanel (Nginx, MySQL, PHP)"),
                      ("web", "🌐  Файлы сайтов (/var/www, /home)"),
                      ("conf", "⚙  Настройки служб (/etc/...)"),
                      ("db", "🗄  Базы данных (MySQL / PostgreSQL)")]:
-            chk(rc, t, self.ropt[k]).pack(anchor="w", padx=16, pady=4)
-        ctk.CTkFrame(rc, height=6, fg_color="transparent").pack()
+            pass
+        rg = ctk.CTkFrame(rc, fg_color="transparent"); rg.pack(fill="x", padx=12, pady=(0, 8)); rg.columnconfigure((0, 1), weight=1)
+        rl = [("clp", "🧩  Чистый сервер: установить CloudPanel"), ("web", "🌐  Файлы сайтов (/var/www, /home)"),
+              ("conf", "⚙  Настройки служб (/etc/...)"), ("db", "🗄  Базы данных (MySQL / PostgreSQL)")]
+        for i, (k, t) in enumerate(rl):
+            chk(rg, t, self.ropt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=3)
         rb = ctk.CTkFrame(tr, fg_color="transparent"); rb.pack(fill="x", padx=12, pady=(0, 8))
         self.checkb = btn(rb, "🔍  Проверить сервер", lambda: self.restore(check_only=True), primary=False)
         self.checkb.pack(side="left")
         self.rstart = btn(rb, "▶  Начать восстановление", self.restore, width=200); self.rstart.pack(side="left", padx=8)
 
         # ----- общая нижняя часть -----
-        bot = card(self._main); bot.pack(fill="x", padx=28, pady=(6, 18))
-        top = ctk.CTkFrame(bot, fg_color="transparent"); top.pack(fill="x", padx=12, pady=(10, 4))
-        self.stopb = ctk.CTkButton(top, text="■  Остановить", height=34, corner_radius=10, state="disabled",
+        bot = card(self._main); bot.pack(fill="x", padx=28, pady=(4, 12))
+        top = ctk.CTkFrame(bot, fg_color="transparent"); top.pack(fill="x", padx=12, pady=(8, 2))
+        self.stopb = ctk.CTkButton(top, text="■  Остановить", height=30, corner_radius=8, state="disabled",
                                    fg_color=ERR, hover_color="#C93A3F", text_color="#FFFFFF", command=self.stop,
                                    font=ctk.CTkFont(FONT, 13, "bold"))
         self.stopb.pack(side="left")
         self.remember = ctk.BooleanVar(value=True)
-        chk(top, "Запоминать настройки (пароли — в защищённом хранилище Windows)", self.remember).pack(side="left", padx=12)
+        chk(top, "Запоминать настройки", self.remember).pack(side="left", padx=12)
         self.status = ctk.CTkLabel(top, text="Готов к работе", text_color=MUTED); self.status.pack(side="right")
         self.bar = ctk.CTkProgressBar(bot, height=6, corner_radius=3, progress_color=ACCENT, fg_color=SOFT)
         self.bar.pack(fill="x", padx=12, pady=4); self.bar.set(0)
-        self.log = ctk.CTkTextbox(bot, height=170, font=("Cascadia Mono", 12), fg_color="#FAFBFE", text_color=TXT,
+        self.log = ctk.CTkTextbox(bot, height=110, font=("Cascadia Mono", 12), fg_color="#FAFBFE", text_color=TXT,
                                   border_width=0, corner_radius=10)
-        self.log.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+        self.log.pack(fill="both", expand=True, padx=12, pady=(2, 10))
         for tag, col in (("ok", OK), ("warn", WARN), ("err", ERR), ("info", ACCENT)):
             self.log.tag_config(tag, foreground=col)
         self.show("backup")
@@ -507,7 +524,7 @@ class App(ctk.CTk):
         self.page_title.configure(text=t); self.page_sub.configure(text=sub)
 
     def _sched_ui(self, ts):
-        c = card(ts, "Автоматический бэкап по расписанию"); c.pack(fill="x", padx=12, pady=(0, 12))
+        c = card(ts, "Автоматический бэкап по расписанию"); c.pack(fill="x", padx=12, pady=(0, 8))
         ctk.CTkLabel(c, text="Программа сама начнёт бэкап в выбранное время, если она запущена (можно свернуть). "
                      "Пароли берутся из сохранённого списка серверов.", text_color=MUTED, wraplength=800,
                      justify="left").pack(anchor="w", padx=14, pady=(0, 8))
@@ -531,7 +548,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(c, text="Что сохранять и в какую папку — берётся с вкладки «Создать бэкап».",
                      text_color=MUTED).pack(anchor="w", padx=16, pady=(0, 10))
 
-        a = card(ts, "Запуск вместе с Windows"); a.pack(fill="x", padx=12, pady=(0, 12))
+        a = card(ts, "Запуск вместе с Windows"); a.pack(fill="x", padx=12, pady=(0, 8))
         self.auto = ctk.BooleanVar(value=get_autostart())
         chk(a, "Запускать программу при входе в Windows (свёрнутой)", self.auto).pack(anchor="w", padx=16, pady=4)
         self.auto.trace_add("write", lambda *_: self._toggle_autostart())
@@ -580,7 +597,7 @@ class App(ctk.CTk):
 
     # ---------- облако ----------
     def _cloud_ui(self, pg):
-        c = card(pg, "Облачное хранилище"); c.pack(fill="x", padx=12, pady=(0, 12))
+        c = card(pg, "Облачное хранилище"); c.pack(fill="x", padx=12, pady=(0, 8))
         ctk.CTkLabel(c, text="После каждого бэкапа программа сама отправит копию в облако (и при бэкапе по расписанию). "
                      "Если интернет пропадёт — копия на компьютере останется целой.", text_color=MUTED,
                      wraplength=800, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
