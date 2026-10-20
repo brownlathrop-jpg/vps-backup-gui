@@ -1,11 +1,11 @@
-"""Загрузка бэкапов в облако: Яндекс Диск (WebDAV) и Облако Mail.ru (API мобильного клиента)."""
+"""Загрузка бэкапов в облако: Яндекс Диск (WebDAV), Облако Mail.ru (API клиента) и Google Диск (OAuth)."""
 import os, posixpath, re
 import xml.etree.ElementTree as ET
 from urllib.parse import quote, unquote
 import requests
 
 TIMEOUT = (20, 120)
-PROVIDERS = {"yandex": "Яндекс Диск", "mailru": "Облако Mail.ru"}
+PROVIDERS = {"yandex": "Яндекс Диск", "mailru": "Облако Mail.ru", "google": "Google Диск"}
 
 
 class CloudError(Exception):
@@ -151,7 +151,181 @@ class MailRu:
         self._api("POST", "/file/remove", data={"home": f"{folder}/{name}"})
 
 
+
+
+# ---------------- Google Диск ----------------
+# Коды приложения из Google Cloud Console (тип «Приложение для компьютера»).
+# Для настольных программ Google не считает их секретными: доступ даёт только согласие пользователя.
+GOOGLE_CLIENT_ID = ""
+GOOGLE_CLIENT_SECRET = ""
+G_SCOPE = "https://www.googleapis.com/auth/drive.file openid email"
+G_API = "https://www.googleapis.com/drive/v3"
+G_UP = "https://www.googleapis.com/upload/drive/v3/files"
+G_FOLDER = "application/vnd.google-apps.folder"
+CHUNK = 8 * 1024 * 1024
+
+
+def google_ready():
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
+
+def google_login(timeout=300):
+    """Открывает окно входа Google в браузере. Возвращает (email, refresh_token)."""
+    import base64, hashlib, secrets, socket, threading, webbrowser
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import urlencode, urlparse, parse_qs
+    if not google_ready():
+        raise CloudError("Google Диск ещё не подключён в этой версии программы")
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(16); got = {}
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = parse_qs(urlparse(self.path).query)
+            if q.get("state", [""])[0] == state:
+                got["code"] = q.get("code", [""])[0]; got["error"] = q.get("error", [""])[0]
+            ok = bool(got.get("code"))
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+            msg = "Готово! Вернитесь в программу VPS Backup — это окно можно закрыть." if ok else \
+                  "Вход не выполнен. Вернитесь в программу и попробуйте ещё раз."
+            self.wfile.write(f"<html><body style='font-family:Segoe UI;padding:40px;font-size:18px'>{msg}</body></html>".encode())
+
+        def log_message(self, *a): pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H); port = srv.server_address[1]
+    redirect = f"http://127.0.0.1:{port}"
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(dict(
+        client_id=GOOGLE_CLIENT_ID, redirect_uri=redirect, response_type="code", scope=G_SCOPE,
+        access_type="offline", prompt="consent", state=state,
+        code_challenge=challenge, code_challenge_method="S256"))
+    srv.timeout = 1
+    webbrowser.open(url)
+    import time as _t
+    end = _t.time() + timeout
+    try:
+        while not got and _t.time() < end: srv.handle_request()
+    finally: srv.server_close()
+    if not got.get("code"):
+        raise CloudError("Вход в Google не завершён" + (f" ({got['error']})" if got.get("error") else " (истекло время)"))
+    r = requests.post("https://oauth2.googleapis.com/token", timeout=TIMEOUT, data=dict(
+        code=got["code"], client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET,
+        redirect_uri=redirect, grant_type="authorization_code", code_verifier=verifier))
+    j = r.json() if r.content else {}
+    if r.status_code != 200 or "refresh_token" not in j:
+        raise CloudError(f"Google не выдал доступ ({j.get('error_description') or j.get('error') or r.status_code})")
+    email = ""
+    try:
+        u = requests.get("https://openidconnect.googleapis.com/v1/userinfo", timeout=TIMEOUT,
+                         headers={"Authorization": "Bearer " + j["access_token"]}).json()
+        email = u.get("email", "")
+    except Exception: pass
+    return email or "Google", j["refresh_token"]
+
+
+class GDrive:
+    def __init__(self, login, refresh_token):
+        if not google_ready(): raise CloudError("Google Диск ещё не подключён в этой версии программы")
+        self.rt = refresh_token; self.s = requests.Session(); self._token()
+
+    def _token(self):
+        r = requests.post("https://oauth2.googleapis.com/token", timeout=TIMEOUT, data=dict(
+            client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET,
+            refresh_token=self.rt, grant_type="refresh_token"))
+        j = r.json() if r.content else {}
+        if r.status_code != 200 or "access_token" not in j:
+            raise CloudError("Вход в Google устарел — нажмите «Войти через Google» ещё раз")
+        self.s.headers["Authorization"] = "Bearer " + j["access_token"]
+
+    def _req(self, method, url, ok=(200,), **kw):
+        kw.setdefault("timeout", TIMEOUT)
+        r = self.s.request(method, url, **kw)
+        if r.status_code == 401: self._token(); r = self.s.request(method, url, **kw)
+        if r.status_code == 403 and "storageQuotaExceeded" in r.text: raise CloudError("На Google Диске закончилось место")
+        if r.status_code not in ok: raise CloudError(f"Google Диск ответил ошибкой {r.status_code}: {r.text[:200]}")
+        return r
+
+    def quota(self):
+        q = self._req("GET", G_API + "/about", params={"fields": "storageQuota"}).json().get("storageQuota", {})
+        total = int(q.get("limit") or 0); used = int(q.get("usage") or 0)
+        return (max(0, total - used) if total else 0), total
+
+    def _find(self, name, parent, folder=True):
+        nm = name.replace("\\", "\\\\").replace("'", "\\'")
+        q = f"name='{nm}' and '{parent}' in parents and trashed=false"
+        if folder: q += f" and mimeType='{G_FOLDER}'"
+        f = self._req("GET", G_API + "/files", params={"q": q, "fields": "files(id)", "pageSize": 10}).json().get("files", [])
+        return f[0]["id"] if f else None
+
+    def _folder_id(self, folder, create):
+        cur = "root"
+        for part in [p for p in folder.split("/") if p]:
+            fid = self._find(part, cur)
+            if not fid:
+                if not create: return None
+                fid = self._req("POST", G_API + "/files", json={"name": part, "mimeType": G_FOLDER, "parents": [cur]},
+                                params={"fields": "id"}).json()["id"]
+            cur = fid
+        return cur
+
+    def mkdirs(self, folder): self._folder_id(folder, True)
+
+    def _files(self, folder):
+        fid = self._folder_id(folder, False)
+        if not fid: return {}
+        out, tok = {}, None
+        while True:
+            p = {"q": f"'{fid}' in parents and trashed=false and mimeType!='{G_FOLDER}'",
+                 "fields": "nextPageToken,files(id,name)", "pageSize": 1000}
+            if tok: p["pageToken"] = tok
+            j = self._req("GET", G_API + "/files", params=p).json()
+            for f in j.get("files", []): out[f["name"]] = f["id"]
+            tok = j.get("nextPageToken")
+            if not tok: return out
+
+    def list(self, folder): return list(self._files(folder))
+
+    def upload(self, local, folder, name, cb=None, cancel=None):
+        """Загрузка частями: при обрыве связи продолжает с того же места."""
+        import time as _t
+        size = os.path.getsize(local); parent = self._folder_id(folder, True)
+        r = self._req("POST", G_UP, params={"uploadType": "resumable"}, json={"name": name, "parents": [parent]},
+                      headers={"X-Upload-Content-Type": "application/gzip", "X-Upload-Content-Length": str(size)})
+        loc = r.headers["Location"]; pos = 0; fails = 0
+        with open(local, "rb") as f:
+            while pos < size:
+                if cancel and cancel.is_set(): raise CloudError("Остановлено пользователем")
+                f.seek(pos); data = f.read(CHUNK); end = pos + len(data) - 1
+                try:
+                    r = self.s.put(loc, data=data, timeout=(20, 300),
+                                   headers={"Content-Range": f"bytes {pos}-{end}/{size}"})
+                    if r.status_code in (200, 201): pos = size
+                    elif r.status_code == 308:
+                        rg = r.headers.get("Range"); pos = int(rg.split("-")[1]) + 1 if rg else 0
+                    elif r.status_code == 401: self._token(); continue
+                    else: raise CloudError(f"Google Диск ответил ошибкой {r.status_code}")
+                    fails = 0
+                except (requests.ConnectionError, requests.Timeout):
+                    fails += 1
+                    if fails > 20: raise CloudError("Нет связи с Google Диском больше 10 минут")
+                    _t.sleep(30)
+                    try:  # узнаём, сколько уже дошло, и продолжаем с этого места
+                        s = self.s.put(loc, headers={"Content-Range": f"bytes */{size}"}, timeout=TIMEOUT)
+                        if s.status_code in (200, 201): pos = size
+                        elif s.status_code == 308:
+                            rg = s.headers.get("Range"); pos = int(rg.split("-")[1]) + 1 if rg else 0
+                    except (requests.ConnectionError, requests.Timeout): pass
+                if cb: cb(pos, size)
+
+    def delete(self, folder, name):
+        fid = self._files(folder).get(name)
+        if fid: self._req("DELETE", f"{G_API}/files/{fid}", ok=(200, 204, 404))
+
+
 def open_cloud(provider, login, pwd):
+    if provider == "google":
+        if not pwd: raise CloudError("Нажмите «Войти через Google»")
+        return GDrive(login, pwd)
     if not login or not pwd: raise CloudError("Укажите логин и пароль приложения")
     return Yandex(login, pwd) if provider == "yandex" else MailRu(login, pwd)
 
@@ -172,7 +346,16 @@ def send_backup(provider, login, pwd, folder, local, server_prefix, keep, log, c
     c.mkdirs(folder)
     name = os.path.basename(local)
     log(f"[*] Загрузка в {PROVIDERS[provider]}: {folder}/{name}")
-    c.upload(local, folder, name, cb, cancel)
+    import time as _t
+    for att in range(1, 4):  # обрыв сети: ждём и пробуем снова (Google сам продолжает с места)
+        try: c.upload(local, folder, name, cb, cancel); break
+        except (requests.ConnectionError, requests.Timeout):
+            if att == 3 or (cancel and cancel.is_set()): raise
+            log(f"[!] Связь с облаком пропала. Повтор через 30 с (попытка {att + 1} из 3)...")
+            for _ in range(30):
+                if cancel and cancel.is_set(): raise CloudError("Остановлено пользователем")
+                _t.sleep(1)
+            c = open_cloud(provider, login, pwd)
     log("[+] Копия в облаке сохранена")
     for n in old_copies(c.list(folder), server_prefix, keep):
         c.delete(folder, n); log(f"[i] Удалена старая копия в облаке: {n}")

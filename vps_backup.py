@@ -15,6 +15,28 @@ APP = "VPSBackup"
 CFG_DIR = Path(os.environ.get("APPDATA", Path.home())) / APP
 CFG_FILE = CFG_DIR / "settings.json"
 WEB_PATHS = ["var/www", "home"]
+# Что пропускать в режиме «без кэша»: всё это программы создают заново сами
+SLIM_EXCLUDES = ["node_modules", ".npm", ".cache", ".yarn/cache", ".pnpm-store", ".pm2/logs",
+                 "home/*/logs", "var/www/*/logs", "__pycache__", "*.sock"]
+# После восстановления: ставим недостающие node_modules в каждом проекте и поднимаем pm2
+NPM_CMD = r"""
+command -v find >/dev/null || exit 0
+N=0
+while IFS= read -r f; do
+  d=$(dirname "$f"); [ -d "$d/node_modules" ] && continue
+  u=$(stat -c %U "$d"); N=$((N+1)); echo ">> $d  (пользователь $u)"
+  su - "$u" -s /bin/bash -c "export NVM_DIR=\$HOME/.nvm; [ -s \$NVM_DIR/nvm.sh ] && . \$NVM_DIR/nvm.sh; cd '$d' || exit 1;
+    command -v npm >/dev/null || { echo '   npm не найден — установите Node.js для этого пользователя'; exit 7; };
+    if [ -f package-lock.json ]; then npm ci --no-audit --no-fund --loglevel=error || npm install --no-audit --no-fund --loglevel=error;
+    else npm install --no-audit --no-fund --loglevel=error; fi && echo '   ✓ готово'" 2>&1 | tail -n 4
+done < <(find /home /var/www -maxdepth 6 -name package.json -not -path '*/node_modules/*' -not -path '*/.*/*' 2>/dev/null)
+[ "$N" = 0 ] && echo "Проектов без node_modules не найдено"
+for h in /home/* /root; do
+  [ -f "$h/.pm2/dump.pm2" ] || continue; u=$(stat -c %U "$h")
+  su - "$u" -s /bin/bash -c 'export NVM_DIR=$HOME/.nvm; [ -s $NVM_DIR/nvm.sh ] && . $NVM_DIR/nvm.sh; command -v pm2 >/dev/null && pm2 resurrect >/dev/null 2>&1 && echo "pm2 запущен для '"$u"'"'
+done
+exit 0
+"""
 CONF_PATHS = ["etc/nginx", "etc/apache2", "etc/httpd", "etc/mysql", "etc/postgresql",
               "etc/php", "etc/letsencrypt", "etc/ssh/sshd_config", "etc/crontab",
               "etc/cron.d", "var/spool/cron", "etc/systemd/system", "etc/hosts", "etc/fstab"]
@@ -424,7 +446,7 @@ class App(ctk.CTk):
                      fg_color=ACCENT, corner_radius=12).pack(side="left")
         tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
         ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
-        ctk.CTkLabel(tt, text="версия 4.5", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.6", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
         self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 20, "bold"), text_color=TXT)
         self.page_title.pack(anchor="w", padx=28, pady=(12, 0))
@@ -462,6 +484,8 @@ class App(ctk.CTk):
         for i, (k, t) in enumerate([("db", "🗄  Базы данных (MySQL / PostgreSQL)"), ("web", "🌐  Файлы сайтов (/var/www, /home)"),
                                     ("conf", "⚙  Настройки служб (nginx, cron…)"), ("pkgs", "📦  Список программ")]):
             chk(g, t, self.opt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=3)
+        self.slim = ctk.BooleanVar(value=True)
+        chk(c, "⚡  Без кэша: пропускать node_modules, кэши и логи (архив в разы меньше)", self.slim).pack(anchor="w", padx=16, pady=(0, 6))
         df = ctk.CTkFrame(c, fg_color="transparent"); df.pack(fill="x", padx=14, pady=(0, 6))
         ctk.CTkLabel(df, text="Папка:", text_color=MUTED).pack(side="left", padx=(0, 8))
         self.dest = entry(df); self.dest.pack(side="left", fill="x", expand=True)
@@ -483,7 +507,7 @@ class App(ctk.CTk):
         self.oslbl.pack(fill="x", padx=14, pady=(0, 8), ipady=4, ipadx=8)
         self.rconn = ConnForm(tr, self, "Новый сервер (куда разворачивать)"); self.rconn.pack(fill="x", padx=12, pady=(0, 8))
         rc = card(tr, "Что восстановить"); rc.pack(fill="x", padx=12, pady=(0, 8))
-        self.ropt = {k: ctk.BooleanVar(value=v) for k, v in (("clp", False), ("web", True), ("conf", True), ("db", True))}
+        self.ropt = {k: ctk.BooleanVar(value=v) for k, v in (("clp", False), ("web", True), ("conf", True), ("db", True), ("npm", True))}
         for k, t in [("clp", "🧩  Чистый сервер: сначала установить CloudPanel (Nginx, MySQL, PHP)"),
                      ("web", "🌐  Файлы сайтов (/var/www, /home)"),
                      ("conf", "⚙  Настройки служб (/etc/...)"),
@@ -491,7 +515,8 @@ class App(ctk.CTk):
             pass
         rg = ctk.CTkFrame(rc, fg_color="transparent"); rg.pack(fill="x", padx=12, pady=(0, 8)); rg.columnconfigure((0, 1), weight=1)
         rl = [("clp", "🧩  Чистый сервер: установить CloudPanel"), ("web", "🌐  Файлы сайтов (/var/www, /home)"),
-              ("conf", "⚙  Настройки служб (/etc/...)"), ("db", "🗄  Базы данных (MySQL / PostgreSQL)")]
+              ("conf", "⚙  Настройки служб (/etc/...)"), ("db", "🗄  Базы данных (MySQL / PostgreSQL)"),
+              ("npm", "📦  Node.js: сам выполнить npm install и запустить pm2")]
         for i, (k, t) in enumerate(rl):
             chk(rg, t, self.ropt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=3)
         rb = ctk.CTkFrame(tr, fg_color="transparent"); rb.pack(fill="x", padx=12, pady=(0, 8))
@@ -700,6 +725,7 @@ class App(ctk.CTk):
                                    corner_radius=8, wraplength=780)
         self.c_hint.pack(fill="x", padx=16, pady=8, ipady=8, ipadx=8)
         b = ctk.CTkFrame(c, fg_color="transparent"); b.pack(fill="x", padx=16, pady=(0, 14))
+        self.g_btn = btn(b, "🔑  Войти через Google", self._google_login, width=200)
         btn(b, "🔌  Проверить подключение", self._cloud_test, width=220).pack(side="left")
         btn(b, "💾  Сохранить", self._cloud_save, primary=False).pack(side="left", padx=8)
         self.c_stat = ctk.CTkLabel(b, text="", text_color=MUTED); self.c_stat.pack(side="left", padx=8)
@@ -708,7 +734,37 @@ class App(ctk.CTk):
     def _cloud_key(self):
         return {v: k for k, v in cloud.PROVIDERS.items()}.get(self.c_prov.get(), "yandex")
 
+    def _google_login(self):
+        if not cloud.google_ready():
+            return messagebox.showinfo("Google Диск", "Google Диск появится в следующей версии программы.")
+        self.c_stat.configure(text="Открыл окно Google в браузере — разрешите доступ...", text_color=MUTED)
+        def job():
+            try:
+                email, tok = cloud.google_login()
+                def ok():
+                    for w in (self.c_login, self.c_pwd): w.configure(state="normal")
+                    self.c_login.delete(0, "end"); self.c_login.insert(0, email)
+                    self.c_pwd.delete(0, "end"); self.c_pwd.insert(0, tok)
+                    self._cloud_save(quiet=True); self._cloud_hint(); self._cloud_test()
+                self.after(0, ok)
+            except Exception as e:
+                t = str(e) if isinstance(e, cloud.CloudError) else net_msg(e)
+                self.after(0, lambda: self.c_stat.configure(text=f"✗ {t}", text_color=ERR))
+        threading.Thread(target=job, daemon=True).start()
+
     def _cloud_hint(self):
+        g = self._cloud_key() == "google"
+        if hasattr(self, "g_btn"):
+            if g: self.g_btn.pack(side="left", padx=(0, 8), before=self.g_btn.master.winfo_children()[1])
+            else: self.g_btn.pack_forget()
+        for w in (self.c_login, self.c_pwd):
+            w.configure(state="disabled" if g else "normal")
+        if g:
+            t = ("Как подключить (30 секунд):\n1. Нажмите «Войти через Google» — откроется браузер.\n"
+                 "2. Выберите аккаунт и нажмите «Разрешить». Если Google напишет «Приложение не проверено» — "
+                 "«Дополнительно» → «Перейти в VPS Backup».\nПрограмма видит только свои файлы на Диске. "
+                 "Бесплатно 15 ГБ (общие с Gmail и Фото). При обрыве связи загрузка продолжается с того же места.")
+            self.c_hint.configure(text=t); return
         if self._cloud_key() == "yandex":
             t = ("Как получить пароль приложения (1 минута):\n1. Откройте id.yandex.ru → «Безопасность» → «Пароли приложений».\n"
                  "2. Создайте пароль для «Файлы (WebDAV)» и вставьте его сюда.\nЛогин — ваша почта Яндекса. Работает бесплатно.")
@@ -740,6 +796,7 @@ class App(ctk.CTk):
     def _cloud_load(self, d):
         cc = d.get("cloud") or {}; self.cloudcfg = cc
         self.c_prov.set(cloud.PROVIDERS.get(cc.get("provider", "yandex"), "Яндекс Диск"))
+        for w in (self.c_login, self.c_pwd): w.configure(state="normal")
         for e, k, dv in ((self.c_login, "login", ""), (self.c_folder, "folder", "/VPS_Backups"), (self.c_keep, "keep", 5)):
             e.delete(0, "end"); e.insert(0, str(cc.get(k, dv)))
         if cc.get("login"):
@@ -811,7 +868,7 @@ class App(ctk.CTk):
             except Exception: pass
         cfg = dict(host=d.get("host", ""), port=int(d.get("port") or 22), user=d.get("user") or "root",
                    auth=d.get("auth", "password"), pwd=pwd, key=d.get("key", ""), name=n,
-                   dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get())
+                   dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get(), slim=self.slim.get())
         self.q.put(("log", f"\n===== Сервер «{n}» ====="))
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
@@ -826,7 +883,7 @@ class App(ctk.CTk):
             self.arch.delete(0, "end"); self.arch.insert(0, p); self._read_os(p)
 
     def _read_os(self, p):
-        self.archive_os = None; meta = {}
+        self.archive_os = None; meta = {}; self.archive_meta = {}
         try:
             with tarfile.open(p, "r|gz") as t:
                 for i, m in enumerate(t):
@@ -837,6 +894,7 @@ class App(ctk.CTk):
                         self.archive_os = parse_os(t.extractfile(m).read().decode("utf-8", "replace"))
         except Exception as e:
             self.oslbl.configure(text=f"Не удалось прочитать архив: {e}", text_color=ERR); return
+        self.archive_meta = meta
         if not self.archive_os and meta.get("os"):
             self.archive_os = (meta["os"], meta.get("os_id", ""), meta.get("os_version", ""))
         lines = []
@@ -849,6 +907,8 @@ class App(ctk.CTk):
         if self.archive_os:
             lines.append(f"🐧  ОС:  {self.archive_os[0]}  — закажите новый VPS с этой же системой")
         if meta.get("contents"): lines.append("📦  Содержимое:  " + ", ".join(meta["contents"]))
+        if meta: lines.append("⚡  Тип:  " + (meta.get("kind") or "полный") +
+                              ("  — при восстановлении программа сама выполнит npm install" if meta.get("slim") else ""))
         if lines:
             self.oslbl.configure(text="\n".join(lines), text_color=OK if meta else TXT)
         else:
@@ -870,7 +930,7 @@ class App(ctk.CTk):
         data = self.conn.dump()
         data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump(),
                     servers=self.servers, schedule=self.sched, cloud=getattr(self, "cloudcfg", {}) or {},
-                    to_cloud=self.to_cloud.get())
+                    to_cloud=self.to_cloud.get(), slim=self.slim.get())
         CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self):
@@ -886,6 +946,7 @@ class App(ctk.CTk):
         self.dest.delete(0, "end"); self.dest.insert(0, d.get("dest", str(Path.home() / "VPS_Backups")))
         for k, v in d.get("opt", {}).items():
             if k in self.opt: self.opt[k].set(v)
+        if "slim" in d: self.slim.set(bool(d["slim"]))
         self._sched_load(d)
 
     # ---------- общее ----------
@@ -958,7 +1019,7 @@ class App(ctk.CTk):
         if not self.conn.host.get().strip(): return messagebox.showerror("Ошибка", "Укажите IP или хост сервера")
         if not any(v.get() for v in self.opt.values()): return messagebox.showerror("Ошибка", "Выберите, что бэкапить")
         self._begin()
-        cfg = self.conn.cfg(); cfg.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get())
+        cfg = self.conn.cfg(); cfg.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, cloud=self.to_cloud.get(), slim=self.slim.get())
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
     def _stream(self, ssh, cmd, path, label):
@@ -984,7 +1045,11 @@ class App(ctk.CTk):
                     if tr is None or not tr.is_active(): raise ConnectionError("SSH-соединение закрыто")
                     if ch.closed and not ch.recv_ready():
                         raise ConnectionError("канал закрыт до завершения команды")
-                    if time.time() - idle > 180: raise ConnectionError("сервер не отвечает 3 минуты")
+                    if time.time() - idle > 90: raise ConnectionError("сервер не присылает данные 90 секунд")
+                    if time.time() - idle > 15 and time.time() - last > 1:
+                        last = time.time()
+                        self.q.put(("status", f"{label}: {done/1048576:.1f} МБ — нет данных уже {int(time.time()-idle)} с"))
+                        continue
                     time.sleep(0.02)
                 if time.time() - last > 0.3:
                     last = time.time(); sp = done / max(last - t0, 0.1) / 1048576
@@ -993,9 +1058,23 @@ class App(ctk.CTk):
         code = ch.recv_exit_status(); self.chan = None; ch.close()
         return code, err.decode("utf-8", "replace").strip()
 
-    def _worker(self, c):
+    def _wait_net(self, c, L, secs=30):
+        """Ждёт, пока сервер снова станет доступен. False — если пользователь нажал «Остановить»."""
+        t0 = time.time()
+        while not self.cancel.is_set():
+            left = int(secs - (time.time() - t0))
+            if left <= 0:
+                try:
+                    socket.create_connection((c["host"], int(c.get("port") or 22)), timeout=5).close(); return True
+                except OSError:
+                    self.q.put(("status", "Нет связи с сервером — жду появления сети...")); t0 = time.time() - secs + 10
+            else: self.q.put(("status", f"Связь потеряна. Повтор через {left} с..."))
+            time.sleep(1)
+        return False
+
+    def _worker(self, c, attempt=1):
         L = lambda m: self.q.put(("log", m))
-        ssh = None; tmp = final = None
+        ssh = None; tmp = final = None; retry = False
         try:
             Path(c["dest"]).mkdir(parents=True, exist_ok=True)
             ssh = connect(c, L); self.q.put(("bar", 0.05))
@@ -1015,7 +1094,8 @@ class App(ctk.CTk):
             meta = dict(format=1, app="VPS Backup v4", server_name=c.get("name") or c["host"], host=c["host"],
                         port=c["port"], user=c["user"], hostname=hn, created=time.strftime("%d.%m.%Y %H:%M"),
                         os=osi[0], os_id=osi[1], os_version=osi[2],
-                        contents=[v for k, v in names.items() if c["opt"].get(k)])
+                        contents=[v for k, v in names.items() if c["opt"].get(k)], slim=bool(c.get("slim")),
+                        kind="без кэша (node_modules и кэши создаются заново)" if c.get("slim") else "полный")
             (tmp / "backup_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
             L("[*] Режим «на лету»: на диске сервера ничего не создаётся")
             errors = []
@@ -1041,16 +1121,22 @@ class App(ctk.CTk):
                     if code != 0 or (tmp / fn).stat().st_size == 0: (tmp / fn).unlink()
                 L("[+] Список пакетов сохранён"); self.q.put(("bar", 0.3))
             paths = (WEB_PATHS if o["web"] else []) + (CONF_PATHS if o["conf"] else [])
+            ex = "".join(f"--exclude={shlex.quote(x)} " for x in (SLIM_EXCLUDES if c.get("slim") else ["*.sock"]))
             if paths:
                 plist = " ".join(shlex.quote(p) for p in paths)
                 cmd = (f'cd / && P=""; for p in {plist}; do [ -e "/$p" ] && P="$P $p"; done; '
-                       '[ -z "$P" ] && exit 5; tar -czf - --ignore-failed-read --warning=no-file-changed $P')
+                       '[ -z "$P" ] && exit 5; tar -czf - --ignore-failed-read --warning=no-file-changed '
+                       '--warning=no-file-ignored ' + ex + '$P')
+                if c.get("slim"): L("[i] Режим «без кэша»: node_modules, кэши и логи пропускаются")
                 L("[*] Архивация и скачивание файлов сайтов/конфигураций (может занять долго)...")
                 self.q.put(("bar", 0.35))
                 code, err = self._stream(ssh, cmd, tmp / "files.tar.gz", "Файлы")
                 if code == 5: L("[-] Папки не найдены"); (tmp / "files.tar.gz").unlink()
                 elif code in (0, 1): L(f"[+] Файлы скачаны ({(tmp/'files.tar.gz').stat().st_size/1048576:.1f} МБ)")
-                else: L(f"[!] Ошибка архивации: {err[-300:]}"); errors.append("tar: " + err)
+                else:
+                    e2 = "\n".join(l for l in err.splitlines() if "socket ignored" not in l)
+                    L(f"[!] Ошибка архивации: {e2[-300:]}"); errors.append("tar: " + e2)
+                err = "\n".join(l for l in err.splitlines() if "socket ignored" not in l)
                 if err and code in (0, 1): errors.append("tar warnings: " + err)
             if errors: (tmp / "errors.log").write_text("\n\n".join(errors), encoding="utf-8")
             self.q.put(("bar", 0.95)); L("[*] Упаковка в один файл...")
@@ -1077,12 +1163,20 @@ class App(ctk.CTk):
                 try: final.unlink()
                 except Exception: pass
             if self.cancel.is_set(): L("[■] Бэкап остановлен пользователем."); self.q.put(("done", ("backup", None)))
-            elif isinstance(e, NET_ERRORS): L(f"[✗] {net_msg(e)}"); self.q.put(("done", ("backup", False)))
+            elif isinstance(e, NET_ERRORS) and attempt < 3:
+                L(f"[!] {net_msg(e)}"); L(f"[*] Подожду связь и начну бэкап заново (попытка {attempt + 1} из 3)")
+                retry = True
+            elif isinstance(e, NET_ERRORS): L(f"[✗] {net_msg(e)} Попытки закончились."); self.q.put(("done", ("backup", False)))
             else: L(f"[✗] ОШИБКА: {e}"); self.q.put(("done", ("backup", False)))
         finally:
             if tmp: shutil.rmtree(tmp, ignore_errors=True)
             self.chan = None
-            if ssh: ssh.close()
+            if ssh:
+                try: ssh.close()
+                except Exception: pass
+        if retry:
+            if self._wait_net(c, L): self._worker(c, attempt + 1)
+            else: L("[■] Бэкап остановлен пользователем."); self.q.put(("done", ("backup", None)))
 
     # ---------- restore ----------
     def restore(self, check_only=False):
@@ -1262,6 +1356,9 @@ class App(ctk.CTk):
                         if code == 3: L("[-] На сервере нет PostgreSQL — пропущено")
                         else: L("[+] PostgreSQL восстановлен")
                         self.q.put(("bar", 0.9))
+            if o.get("npm") and o["web"]:
+                L("[*] Node.js-проекты: устанавливаю недостающие node_modules (npm install)...")
+                self._run_log(ssh, NPM_CMD)
             L("[*] Перезапуск служб...")
             out, _ = self._exec(ssh, RESTART_CMD, timeout=300)
             for l in out.splitlines(): L("    " + l)
