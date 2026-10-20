@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Read version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path vps_backup.py -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -29,7 +34,7 @@ jobs:
           vps_backup.py
       - name: Portable ZIP
         shell: pwsh
-        run: Compress-Archive -Path dist\VPSBackup\* -DestinationPath dist\VPSBackup-portable.zip
+        run: Compress-Archive -Path dist\VPSBackup\* -DestinationPath dist\VPSBackup-portable-v${env:APP_VERSION}.zip
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
@@ -38,12 +43,12 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: VPS Backup build ${{ github.run_number }}
+          tag_name: v${{ env.APP_VERSION }}-build-${{ github.run_number }}
+          name: VPS Backup v${{ env.APP_VERSION }} (сборка ${{ github.run_number }})
           body: |
             Сборка из коммита ${{ github.sha }}.
-            • VPSBackup-Setup.exe — установщик (рекомендуется)
-            • VPSBackup-portable.zip — без установки: распакуйте и запустите VPSBackup.exe
+            • VPSBackup-Setup-v${{ env.APP_VERSION }}.exe — установщик (рекомендуется)
+            • VPSBackup-portable-v${{ env.APP_VERSION }}.zip — без установки: распакуйте и запустите VPSBackup.exe
           files: |
-            dist/VPSBackup-Setup.exe
-            dist/VPSBackup-portable.zip
+            dist/VPSBackup-Setup-v${{ env.APP_VERSION }}.exe
+            dist/VPSBackup-portable-v${{ env.APP_VERSION }}.zip
