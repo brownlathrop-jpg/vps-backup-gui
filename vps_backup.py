@@ -200,37 +200,40 @@ def safe_name(t):
 
 
 # Палитра в стиле Windows 11 (Fluent, светлая)
-BG, CARD, BORDER = "#F3F5F9", "#FFFFFF", "#E1E5EC"
-ACCENT, ACCENT_H = "#0067C0", "#1A7BD1"
-TXT, MUTED = "#1B1F24", "#5F6B7A"
-OK, WARN, ERR = "#0F7B0F", "#9D5D00", "#C42B1C"
-SOFT, SOFT_H = "#EEF1F6", "#E2E7EF"
+BG, CARD, BORDER = "#F4F6FB", "#FFFFFF", "#E6E9F2"
+ACCENT, ACCENT_H = "#3D5AFE", "#5872FF"
+TXT, MUTED = "#151A2D", "#6B7390"
+OK, WARN, ERR = "#12925A", "#B7791F", "#E5484D"
+SOFT, SOFT_H = "#EEF1FA", "#E1E6F5"
+SIDE, SIDE_H, SIDE_T, SIDE_M = "#141A33", "#222A4D", "#FFFFFF", "#8A93B8"
+FONT = "Segoe UI"
 
 
 def card(master, title=None):
-    f = ctk.CTkFrame(master, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10)
+    f = ctk.CTkFrame(master, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=14)
     if title:
-        ctk.CTkLabel(f, text=title, font=ctk.CTkFont(size=14, weight="bold"), text_color=TXT
-                     ).pack(anchor="w", padx=14, pady=(10, 2))
+        ctk.CTkLabel(f, text=title, font=ctk.CTkFont(FONT, 15, "bold"), text_color=TXT
+                     ).pack(anchor="w", padx=18, pady=(14, 4))
     return f
 
 
 def btn(master, text, cmd, primary=True, **kw):
     if primary:
-        return ctk.CTkButton(master, text=text, command=cmd, height=34, corner_radius=6, fg_color=ACCENT,
-                             hover_color=ACCENT_H, text_color="#FFFFFF", font=ctk.CTkFont(size=13, weight="bold"), **kw)
-    return ctk.CTkButton(master, text=text, command=cmd, height=34, corner_radius=6, fg_color=SOFT, hover_color=SOFT_H,
-                         text_color=TXT, border_color=BORDER, border_width=1, **kw)
+        return ctk.CTkButton(master, text=text, command=cmd, height=38, corner_radius=10, fg_color=ACCENT,
+                             hover_color=ACCENT_H, text_color="#FFFFFF", font=ctk.CTkFont(FONT, 13, "bold"), **kw)
+    return ctk.CTkButton(master, text=text, command=cmd, height=38, corner_radius=10, fg_color=SOFT, hover_color=SOFT_H,
+                         text_color=TXT, font=ctk.CTkFont(FONT, 13), border_width=0, **kw)
 
 
 def entry(master, **kw):
-    return ctk.CTkEntry(master, height=32, corner_radius=6, fg_color="#FFFFFF", border_color=BORDER,
-                        text_color=TXT, **kw)
+    return ctk.CTkEntry(master, height=36, corner_radius=10, fg_color="#FAFBFE", border_color=BORDER,
+                        text_color=TXT, font=ctk.CTkFont(FONT, 13), **kw)
 
 
 def chk(master, text, var):
     return ctk.CTkCheckBox(master, text=text, variable=var, text_color=TXT, fg_color=ACCENT, hover_color=ACCENT_H,
-                           border_color="#8A94A3", corner_radius=4, checkbox_width=20, checkbox_height=20)
+                           border_color="#B4BCD6", corner_radius=6, checkbox_width=20, checkbox_height=20,
+                           font=ctk.CTkFont(FONT, 13))
 
 
 class ConnForm(ctk.CTkFrame):
@@ -238,11 +241,11 @@ class ConnForm(ctk.CTkFrame):
     NEW = "+ Новый сервер"
 
     def __init__(self, master, app, title):
-        super().__init__(master, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10)
+        super().__init__(master, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=14)
         self.app = app
         self.columnconfigure(1, weight=1)
-        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=14, weight="bold"), text_color=TXT
-                     ).grid(row=0, column=0, columnspan=3, sticky="w", padx=14, pady=(10, 4))
+        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(FONT, 15, "bold"), text_color=TXT
+                     ).grid(row=0, column=0, columnspan=3, sticky="w", padx=18, pady=(14, 6))
         self.r = 1
         pf = ctk.CTkFrame(self, fg_color="transparent")
         self.prof = ctk.CTkComboBox(pf, values=[self.NEW], state="readonly", command=self._pick_profile, height=32,
@@ -375,7 +378,10 @@ class App(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("light")
         self.title("VPS Backup")
-        self.geometry("920x1000"); self.minsize(820, 760)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(1180, sw - 40), min(900, sh - 90)
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h - 50) // 2)}")
+        self.minsize(min(900, sw - 40), min(600, sh - 90))
         self.configure(fg_color=BG)
         try:
             ico = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "icon.ico"
@@ -394,25 +400,42 @@ class App(ctk.CTk):
         if "--tray" in sys.argv: self.after(200, self.iconify)
 
     def _ui(self):
-        # ----- шапка -----
-        hd = ctk.CTkFrame(self, fg_color="transparent"); hd.pack(fill="x", padx=18, pady=(14, 4))
-        ctk.CTkLabel(hd, text="🛡  VPS Backup", font=ctk.CTkFont(size=22, weight="bold"), text_color=TXT).pack(side="left")
-        ctk.CTkLabel(hd, text=" v4 ", fg_color="#DCEBFA", text_color=ACCENT, corner_radius=8,
-                     font=ctk.CTkFont(size=11, weight="bold")).pack(side="left", padx=10)
-        ctk.CTkLabel(hd, text="Резервные копии серверов на ваш компьютер", text_color=MUTED).pack(side="right")
-
-        self.tabs = ctk.CTkTabview(self, height=600, fg_color=BG, segmented_button_fg_color=SOFT,
-                                   segmented_button_selected_color=ACCENT, segmented_button_selected_hover_color=ACCENT_H,
-                                   segmented_button_unselected_color=SOFT, segmented_button_unselected_hover_color=SOFT_H,
-                                   text_color=TXT, corner_radius=10)
-        self.tabs.pack(fill="x", padx=12)
-        tb = self.tabs.add("  Создать бэкап  "); tr = self.tabs.add("  Восстановить на сервер  ")
-        ts = self.tabs.add("  Расписание  ")
+        # ----- боковое меню -----
+        side = ctk.CTkFrame(self, fg_color=SIDE, corner_radius=0, width=230); side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        lg = ctk.CTkFrame(side, fg_color="transparent"); lg.pack(fill="x", padx=20, pady=(26, 30))
+        ctk.CTkLabel(lg, text="🛡", font=ctk.CTkFont(FONT, 30), text_color=SIDE_T, width=46, height=46,
+                     fg_color=ACCENT, corner_radius=12).pack(side="left")
+        tt = ctk.CTkFrame(lg, fg_color="transparent"); tt.pack(side="left", padx=12)
+        ctk.CTkLabel(tt, text="VPS Backup", font=ctk.CTkFont(FONT, 18, "bold"), text_color=SIDE_T).pack(anchor="w")
+        ctk.CTkLabel(tt, text="версия 4.2", font=ctk.CTkFont(FONT, 11), text_color=SIDE_M).pack(anchor="w")
+        main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0); main.pack(side="left", fill="both", expand=True)
+        self.page_title = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 24, "bold"), text_color=TXT)
+        self.page_title.pack(anchor="w", padx=28, pady=(22, 0))
+        self.page_sub = ctk.CTkLabel(main, text="", font=ctk.CTkFont(FONT, 13), text_color=MUTED)
+        self.page_sub.pack(anchor="w", padx=28, pady=(0, 8))
+        host = ctk.CTkFrame(main, fg_color="transparent"); host.pack(fill="both", expand=True, padx=16)
+        self.pages, self.navb = {}, {}
+        pages = [("backup", "💾   Создать бэкап", "Резервная копия сервера на ваш компьютер"),
+                 ("restore", "🚀   Восстановление", "Развернуть бэкап на другом сервере — безопасно"),
+                 ("sched", "⏰   Расписание", "Автоматические бэкапы в заданное время")]
+        for key, label, sub in pages:
+            pg = ctk.CTkScrollableFrame(host, fg_color="transparent", scrollbar_button_color=SOFT_H,
+                                        scrollbar_button_hover_color="#C9D0E6")
+            self.pages[key] = (pg, label.split("   ")[1], sub)
+            b = ctk.CTkButton(side, text=label, anchor="w", height=44, corner_radius=10, fg_color="transparent",
+                              hover_color=SIDE_H, text_color=SIDE_M, font=ctk.CTkFont(FONT, 14),
+                              command=lambda k=key: self.show(k))
+            b.pack(fill="x", padx=14, pady=3); self.navb[key] = b
+        ctk.CTkLabel(side, text="Пароли хранятся в защищённом\nхранилище Windows", font=ctk.CTkFont(FONT, 11),
+                     text_color=SIDE_M, justify="left").pack(side="bottom", anchor="w", padx=22, pady=20)
+        tb, tr, ts = (self.pages[k][0] for k in ("backup", "restore", "sched"))
+        self._main = main
         self._sched_ui(ts)
 
         # ----- вкладка бэкапа -----
-        self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", pady=(0, 8))
-        c = card(tb, "Что сохранить"); c.pack(fill="x", pady=(0, 8))
+        self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", padx=12, pady=(0, 12))
+        c = card(tb, "Что сохранить"); c.pack(fill="x", padx=12, pady=(0, 12))
         g = ctk.CTkFrame(c, fg_color="transparent"); g.pack(fill="x", padx=12, pady=(2, 6))
         g.columnconfigure((0, 1), weight=1)
         self.opt = {k: ctk.BooleanVar(value=True) for k in ("db", "web", "conf", "pkgs")}
@@ -423,21 +446,21 @@ class App(ctk.CTk):
         ctk.CTkLabel(df, text="Папка:", text_color=MUTED).pack(side="left", padx=(0, 8))
         self.dest = entry(df); self.dest.pack(side="left", fill="x", expand=True)
         btn(df, "Обзор", self._pick_dir, primary=False, width=70).pack(side="left", padx=(6, 0))
-        b = ctk.CTkFrame(tb, fg_color="transparent"); b.pack(fill="x")
+        b = ctk.CTkFrame(tb, fg_color="transparent"); b.pack(fill="x", padx=12, pady=(0, 8))
         self.start = btn(b, "▶  Начать бэкап", self.run, width=180); self.start.pack(side="left")
         self.openb = btn(b, "📂  Открыть папку с бэкапами", self.open_dir, primary=False, state="disabled")
         self.openb.pack(side="left", padx=8)
 
         # ----- вкладка восстановления -----
-        af = card(tr, "Файл бэкапа"); af.pack(fill="x", pady=(0, 8))
+        af = card(tr, "Файл бэкапа"); af.pack(fill="x", padx=12, pady=(0, 12))
         r = ctk.CTkFrame(af, fg_color="transparent"); r.pack(fill="x", padx=14, pady=(2, 6))
         self.arch = entry(r); self.arch.pack(side="left", fill="x", expand=True)
         btn(r, "Обзор", self._pick_archive, primary=False, width=70).pack(side="left", padx=(6, 0))
         self.oslbl = ctk.CTkLabel(af, text="Выберите файл — программа покажет, с какого он сервера", justify="left",
                                   anchor="w", text_color=MUTED, fg_color=SOFT, corner_radius=8)
         self.oslbl.pack(fill="x", padx=14, pady=(0, 12), ipady=8, ipadx=8)
-        self.rconn = ConnForm(tr, self, "Новый сервер (куда разворачивать)"); self.rconn.pack(fill="x", pady=(0, 8))
-        rc = card(tr, "Что восстановить"); rc.pack(fill="x", pady=(0, 8))
+        self.rconn = ConnForm(tr, self, "Новый сервер (куда разворачивать)"); self.rconn.pack(fill="x", padx=12, pady=(0, 12))
+        rc = card(tr, "Что восстановить"); rc.pack(fill="x", padx=12, pady=(0, 12))
         self.ropt = {k: ctk.BooleanVar(value=v) for k, v in (("clp", False), ("web", True), ("conf", True), ("db", True))}
         for k, t in [("clp", "🧩  Чистый сервер: сначала установить CloudPanel (Nginx, MySQL, PHP)"),
                      ("web", "🌐  Файлы сайтов (/var/www, /home)"),
@@ -445,30 +468,41 @@ class App(ctk.CTk):
                      ("db", "🗄  Базы данных (MySQL / PostgreSQL)")]:
             chk(rc, t, self.ropt[k]).pack(anchor="w", padx=16, pady=4)
         ctk.CTkFrame(rc, height=6, fg_color="transparent").pack()
-        rb = ctk.CTkFrame(tr, fg_color="transparent"); rb.pack(fill="x")
+        rb = ctk.CTkFrame(tr, fg_color="transparent"); rb.pack(fill="x", padx=12, pady=(0, 8))
         self.checkb = btn(rb, "🔍  Проверить сервер", lambda: self.restore(check_only=True), primary=False)
         self.checkb.pack(side="left")
         self.rstart = btn(rb, "▶  Начать восстановление", self.restore, width=200); self.rstart.pack(side="left", padx=8)
 
         # ----- общая нижняя часть -----
-        bot = card(self); bot.pack(fill="both", expand=True, padx=12, pady=(6, 12))
+        bot = card(self._main); bot.pack(fill="x", padx=28, pady=(6, 18))
         top = ctk.CTkFrame(bot, fg_color="transparent"); top.pack(fill="x", padx=12, pady=(10, 4))
-        self.stopb = ctk.CTkButton(top, text="■  Остановить", height=32, corner_radius=6, state="disabled",
-                                   fg_color=ERR, hover_color="#A52314", text_color="#FFFFFF", command=self.stop)
+        self.stopb = ctk.CTkButton(top, text="■  Остановить", height=34, corner_radius=10, state="disabled",
+                                   fg_color=ERR, hover_color="#C93A3F", text_color="#FFFFFF", command=self.stop,
+                                   font=ctk.CTkFont(FONT, 13, "bold"))
         self.stopb.pack(side="left")
         self.remember = ctk.BooleanVar(value=True)
         chk(top, "Запоминать настройки (пароли — в защищённом хранилище Windows)", self.remember).pack(side="left", padx=12)
         self.status = ctk.CTkLabel(top, text="Готов к работе", text_color=MUTED); self.status.pack(side="right")
-        self.bar = ctk.CTkProgressBar(bot, height=8, corner_radius=4, progress_color=ACCENT, fg_color=SOFT)
+        self.bar = ctk.CTkProgressBar(bot, height=6, corner_radius=3, progress_color=ACCENT, fg_color=SOFT)
         self.bar.pack(fill="x", padx=12, pady=4); self.bar.set(0)
-        self.log = ctk.CTkTextbox(bot, font=("Consolas", 12), fg_color="#FAFBFD", text_color=TXT, border_color=BORDER,
-                                  border_width=1, corner_radius=8)
+        self.log = ctk.CTkTextbox(bot, height=170, font=("Cascadia Mono", 12), fg_color="#FAFBFE", text_color=TXT,
+                                  border_width=0, corner_radius=10)
         self.log.pack(fill="both", expand=True, padx=12, pady=(4, 12))
         for tag, col in (("ok", OK), ("warn", WARN), ("err", ERR), ("info", ACCENT)):
             self.log.tag_config(tag, foreground=col)
+        self.show("backup")
+
+    def show(self, key):
+        for k, (pg, _, _) in self.pages.items():
+            pg.pack_forget()
+            self.navb[k].configure(fg_color=SIDE_H if k == key else "transparent",
+                                   text_color=SIDE_T if k == key else SIDE_M)
+        pg, t, sub = self.pages[key]
+        pg.pack(fill="both", expand=True)
+        self.page_title.configure(text=t); self.page_sub.configure(text=sub)
 
     def _sched_ui(self, ts):
-        c = card(ts, "Автоматический бэкап по расписанию"); c.pack(fill="x", pady=(0, 8))
+        c = card(ts, "Автоматический бэкап по расписанию"); c.pack(fill="x", padx=12, pady=(0, 12))
         ctk.CTkLabel(c, text="Программа сама начнёт бэкап в выбранное время, если она запущена (можно свернуть). "
                      "Пароли берутся из сохранённого списка серверов.", text_color=MUTED, wraplength=800,
                      justify="left").pack(anchor="w", padx=14, pady=(0, 8))
@@ -492,7 +526,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(c, text="Что сохранять и в какую папку — берётся с вкладки «Создать бэкап».",
                      text_color=MUTED).pack(anchor="w", padx=16, pady=(0, 10))
 
-        a = card(ts, "Запуск вместе с Windows"); a.pack(fill="x", pady=(0, 8))
+        a = card(ts, "Запуск вместе с Windows"); a.pack(fill="x", padx=12, pady=(0, 12))
         self.auto = ctk.BooleanVar(value=get_autostart())
         chk(a, "Запускать программу при входе в Windows (свёрнутой)", self.auto).pack(anchor="w", padx=16, pady=4)
         self.auto.trace_add("write", lambda *_: self._toggle_autostart())
@@ -1073,5 +1107,28 @@ class App(ctk.CTk):
         self.after(100, self._poll)
 
 
+def single_instance():
+    """True — можно запускаться. Если программа уже открыта — показываем её окно и выходим."""
+    if os.name != "nt": return True
+    import ctypes
+    k = ctypes.windll.kernel32; u = ctypes.windll.user32
+    k.CreateMutexW(None, False, "Local\\VPSBackup_single_instance")
+    if k.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        h = u.FindWindowW(None, "VPS Backup")
+        if h:
+            u.ShowWindow(h, 9); u.SetForegroundWindow(h)
+        return False
+    return True
+
+
 if __name__ == "__main__":
-    App().mainloop()
+    if single_instance():
+        app = App()
+        try:
+            import pyi_splash; pyi_splash.close()
+        except Exception: pass
+        app.mainloop()
+    else:
+        try:
+            import pyi_splash; pyi_splash.close()
+        except Exception: pass
