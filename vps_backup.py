@@ -6,7 +6,8 @@ from tkinter import filedialog, messagebox
 import paramiko
 import cloud
 
-VERSION = "4.16"
+VERSION = "4.17"
+PART_SIZE = 1536 * 1048576  # части архива для облака (лимит Mail.ru WebDAV ~2 ГБ на файл)
 RCLONE_URL = {"mailru": "https://webdav.cloud.mail.ru", "yandex": "https://webdav.yandex.ru"}
 RCLONE_INSTALL = ("command -v rclone >/dev/null 2>&1 && { echo \"rclone уже установлен\"; exit 0; }; "
     "echo \"Устанавливаю rclone...\"; (command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || dnf install -y unzip >/dev/null 2>&1); "
@@ -1656,7 +1657,18 @@ class App(ctk.CTk):
             if code != 0: raise Broken("не удалось собрать итоговый архив на сервере (мало места на диске сервера?)")
             size = int(self._exec(ssh, f"stat -c %s {q(A)}")[0].strip() or 0)
             L(f"[✓] Архив на сервере готов и проверен: {name}.tar.gz ({human(size)})")
-            L(f"[*] Загрузка с сервера в {cloud.PROVIDERS[prov]}: {folder}/{name}.tar.gz")
+            fn = name + ".tar.gz"
+            if size > PART_SIZE:
+                n = -(-size // PART_SIZE)
+                L(f"[*] Архив больше {human(PART_SIZE)} — делю на сервере на {n} части (.001, .002 …)")
+                code = self._exec(ssh, f"cd {q(W)} && split -b {PART_SIZE} -d -a 3 --numeric-suffixes=1 {q(fn)} {q(fn + '.')} && rm -f {q(fn)}")[1]
+                if code != 0: raise Broken("не удалось разделить архив на части (мало места на сервере?)")
+                parts = sorted(x for x in self._exec(ssh, f"cd {q(W)} && ls -1 {q(fn)}.[0-9][0-9][0-9]")[0].split())
+                L(f"[i] Части: {', '.join(parts)}. 7-Zip и Total Commander открывают их как один архив (откройте .001)")
+            else:
+                parts = [fn]
+            psz = {x: int(self._exec(ssh, f"stat -c %s {q(W + '/' + x)}")[0].strip() or 0) for x in parts}
+            L(f"[*] Загрузка с сервера в {cloud.PROVIDERS[prov]}: {folder}/")
             self.q.put(("status", "Сервер загружает архив в облако...")); self.q.put(("bar", 0.7))
             self.q.put(("cloud", ("run", f"Сервер → {cloud.PROVIDERS[prov]}")))
             up_ok = False
@@ -1664,48 +1676,57 @@ class App(ctk.CTk):
                 CU = f"curl -sS --netrc-file {NR} --retry 5 --retry-delay 10"
                 url = base + "/" + "/".join(urllib.parse.quote(p) for p in folder.strip("/").split("/")) + "/"
                 self._exec(ssh, f"{CU} -X MKCOL {q(url)} -o /dev/null")
-                code = self._run_log(ssh, f"{CU} -f -T {q(A)} {q(url + name + '.tar.gz')} -o /dev/null -w 'HTTP %{{http_code}}\\n'")
-                if code != 0: raise Exception("загрузка в облако через curl не удалась (на бесплатном тарифе Mail.ru файл не больше 2 ГБ)")
-                rs = self._exec(ssh, f"{CU} -fI {q(url + name + '.tar.gz')} | tr -d '\\r' | awk 'tolower($1)==\"content-length:\"{{print $2}}'")[0].strip()
-                if rs.isdigit() and int(rs) != size: raise Broken("в облаке размер файла не совпал с архивом — загрузите заново")
-                L(f"[✓] В облаке: {folder}/{name}.tar.gz ({human(size)})")
+                for i, x in enumerate(parts, 1):
+                    L(f"[*] Часть {i} из {len(parts)}: {x} ({human(psz[x])})")
+                    code = self._run_log(ssh, f"{CU} -f -T {q(W + '/' + x)} {q(url + x)} -o /dev/null -w 'HTTP %{{http_code}}\\n'")
+                    if code != 0: raise Exception(f"загрузка {x} через curl не удалась")
+                    rs = self._exec(ssh, f"{CU} -fI {q(url + x)} | tr -d '\\r' | awk 'tolower($1)==\"content-length:\"{{print $2}}'")[0].strip()
+                    if rs.isdigit() and int(rs) != psz[x]: raise Broken(f"в облаке размер {x} не совпал — загрузите заново")
                 L("[i] В режиме curl старые копии в облаке не удаляются автоматически")
-                up_ok = True
                 cc["keep"] = 0
             else:
-              code = self._run_log(ssh, f"{RC} mkdir {q('r:' + folder)} 2>/dev/null; {RC} copyto {q(A)} {q(dst)} "
-                                   "--retries 5 --low-level-retries 20 --stats 10s --stats-one-line -v 2>&1 | grep -v DEBUG; exit ${PIPESTATUS[0]}", progress=True)
-              if code != 0: raise Exception("загрузка в облако не удалась (см. строки rclone выше)")
-              rs = self._exec(ssh, f"{RC} size --json {q(dst)}")[0]
-              try:
-                  if json.loads(rs).get("bytes") != size: raise Broken("в облаке размер файла не совпал с архивом — загрузите заново")
-              except ValueError: pass
-              L(f"[✓] В облаке: {folder}/{name}.tar.gz ({human(size)}) — размер сверен")
-              up_ok = True
+                self._exec(ssh, f"{RC} mkdir {q('r:' + folder)} 2>/dev/null")
+                for i, x in enumerate(parts, 1):
+                    if len(parts) > 1: L(f"[*] Часть {i} из {len(parts)}: {x} ({human(psz[x])})")
+                    d = f"r:{folder}/{x}"
+                    code = self._run_log(ssh, f"{RC} copyto {q(W + '/' + x)} {q(d)} --retries 5 --low-level-retries 20 "
+                                         "--stats 10s --stats-one-line -v 2>&1 | grep -v DEBUG; exit ${PIPESTATUS[0]}", progress=True)
+                    if code != 0: raise Exception(f"загрузка {x} в облако не удалась (см. строки rclone выше)")
+                    rs = self._exec(ssh, f"{RC} size --json {q(d)}")[0]
+                    try:
+                        if json.loads(rs).get("bytes") != psz[x]: raise Broken(f"в облаке размер {x} не совпал — загрузите заново")
+                    except ValueError: pass
+            L(f"[✓] В облаке: {folder}/{fn}" + (f" ({len(parts)} части)" if len(parts) > 1 else "") + f", {human(size)} — размер сверен")
+            up_ok = True
             self.q.put(("cloud", ("ok", f"{cloud.PROVIDERS[prov]}: загружено, всё в порядке")))
             ck = int(cc.get("keep", 5) or 0)
             if ck:
                 pre = f"vps_backup_{safe_name(srv)}_"
                 ls = [x for x in self._exec(ssh, f"{RC} lsf --files-only {q('r:' + folder)}")[0].split()
-                      if x.startswith(pre) and x.endswith(".tar.gz")]
-                for x in sorted(ls)[:-ck]:
-                    if self._exec(ssh, f"{RC} deletefile {q('r:' + folder + '/' + x)}")[1] == 0:
-                        L(f"[i] Из облака удалена старая копия {x}")
+                      if x.startswith(pre) and ".tar.gz" in x]
+                bases = sorted({x.split(".tar.gz")[0] for x in ls})
+                for bse in bases[:-ck]:
+                    for x in ls:
+                        if x.split(".tar.gz")[0] == bse and self._exec(ssh, f"{RC} deletefile {q('r:' + folder + '/' + x)}")[1] == 0:
+                            L(f"[i] Из облака удалена старая копия {x}")
             if c.get("save_pc", True):
                 L("[*] Скачиваю копию на компьютер...")
-                part = Path(c["dest"]) / (name + ".tar.gz.writing"); fin = Path(c["dest"]) / (name + ".tar.gz")
-                def cb(d, t):
-                    if self.cancel.is_set(): raise Cancelled()
-                    self.q.put(("bar", 0.75 + 0.2 * d / max(t, 1)))
-                    self.q.put(("status", f"На компьютер: {d/1048576:.0f} из {t/1048576:.0f} МБ"))
+                part = Path(c["dest"]) / (fn + ".writing"); fin = Path(c["dest"]) / fn
                 try:
-                    sftp.get(A, str(part), callback=cb)
+                    with open(part, "wb") as out:
+                        done0 = 0
+                        for x in parts:
+                            def cb(d, t, done0=done0):
+                                if self.cancel.is_set(): raise Cancelled()
+                                self.q.put(("bar", 0.75 + 0.2 * (done0 + d) / max(size, 1)))
+                                self.q.put(("status", f"На компьютер: {(done0 + d)/1048576:.0f} из {size/1048576:.0f} МБ"))
+                            sftp.getfo(W + "/" + x, out, callback=cb); done0 += psz[x]
                     ok, msg = verify_archive(part, self.cancel)
                     if not ok: raise Broken(msg)
                     os.replace(part, fin)
                 finally:
                     if part.exists(): part.unlink()
-                L(f"[✓] Копия на компьютере: {fin} — {msg}")
+                L(f"[✓] Копия на компьютере (одним файлом): {fin} — {msg}")
                 self._rotate(c["dest"], srv, keep, L, protect=fin)
             else:
                 L("[i] Копия на компьютер не сохранялась (так выбрано в разделе «Облако»)")
@@ -1774,6 +1795,8 @@ class App(ctk.CTk):
                     t = l.decode("utf-8", "replace").strip()
                     if not t: continue
                     if progress and self._prog_line(t): continue
+                    # время сервера (обычно UTC) заменяем системным временем компьютера
+                    t = re.sub(r"^\d{4}[/-]\d\d[/-]\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?\s*", "", t)
                     self.q.put(("log", "    " + t[:200]))
             elif ch.exit_status_ready(): break
             else: time.sleep(0.1)
@@ -1980,7 +2003,7 @@ class App(ctk.CTk):
                 k, v = self.q.get_nowait()
                 if k == "log":
                     tag = {"[✓": "ok", "[+": "ok", "[!": "warn", "[■": "warn", "[✗": "err", "[i": "info"}.get(v[:2])
-                    self.log.insert("end", v + "\n", tag); self.log.see("end")
+                    self.log.insert("end", time.strftime("%H:%M:%S") + "  " + v.lstrip() + "\n", tag); self.log.see("end")
                 elif k == "bar": self.bar.set(v)
                 elif k == "ask": self._ask_dialog(v)
                 elif k == "status": self.status.configure(text=v)
