@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox
 import paramiko
 import cloud
 
-VERSION = "4.13"
+VERSION = "4.14"
 RCLONE_URL = {"mailru": "https://webdav.cloud.mail.ru", "yandex": "https://webdav.yandex.ru"}
 RCLONE_INSTALL = ("command -v rclone >/dev/null 2>&1 && { echo \"rclone уже установлен\"; exit 0; }; "
     "echo \"Устанавливаю rclone...\"; (command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || dnf install -y unzip >/dev/null 2>&1); "
@@ -847,7 +847,7 @@ class App(ctk.CTk):
         self.c_hint.pack(fill="x", padx=16, pady=8, ipady=8, ipadx=8)
         b = ctk.CTkFrame(c, fg_color="transparent"); b.pack(fill="x", padx=16, pady=(0, 14))
         self.g_btn = btn(b, "🔑  Войти через Google", self._google_login, width=200)
-        self.w_btn = btn(b, "🌐  Войти через браузер", self._web_login, width=200)
+        self.w_btn = btn(b, "🔗  Сгенерировать пароль", self._web_login, width=210)
         btn(b, "🔌  Проверить подключение", self._cloud_test, width=220).pack(side="left")
         btn(b, "💾  Сохранить", self._cloud_save, primary=False).pack(side="left", padx=8)
         self.c_stat = ctk.CTkLabel(b, text="", text_color=MUTED); self.c_stat.pack(side="left", padx=8)
@@ -893,11 +893,11 @@ class App(ctk.CTk):
         try: self._clip0 = self.clipboard_get()
         except Exception: self._clip0 = ""
         webbrowser.open(self.PW_PAGES[prov])
-        messagebox.showinfo(name, "Открыл страницу в браузере. Войдите в свою почту, если попросит.\n\n"
+        messagebox.showinfo(name, "Пароль для внешних приложений создаётся один раз — потом программа помнит его сама.\n\nОткрыл страницу в браузере. Войдите в свою почту, если попросит.\n\n"
                             "1. Нажмите «Добавить» (создать пароль), имя — «VPS Backup».\n"
                             + ("2. Доступ — «Полный доступ к Почте, Облаку и Календарю».\n" if prov == "mailru" else "2. Тип — «Файлы (WebDAV)».\n")
                             + "3. Нажмите «Скопировать» рядом с готовым паролем.\n\n"
-                            "Программа сама заметит скопированный пароль и проверит вход.")
+                            "Программа сама вставит скопированный пароль и проверит вход.\nЕсли не вставит — вставьте его в поле «Пароль» вручную (Ctrl+V).")
         self.c_stat.configure(text="Жду, когда вы скопируете пароль в браузере...", text_color=MUTED)
         self._clip_wait(180)
 
