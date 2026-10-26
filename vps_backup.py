@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox
 import paramiko
 import cloud
 
-VERSION = "4.14"
+VERSION = "4.15"
 RCLONE_URL = {"mailru": "https://webdav.cloud.mail.ru", "yandex": "https://webdav.yandex.ru"}
 RCLONE_INSTALL = ("command -v rclone >/dev/null 2>&1 && { echo \"rclone уже установлен\"; exit 0; }; "
     "echo \"Устанавливаю rclone...\"; (command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || dnf install -y unzip >/dev/null 2>&1); "
@@ -523,7 +523,7 @@ class App(ctk.CTk):
         host = ctk.CTkFrame(main, fg_color="transparent"); host.pack(fill="both", expand=True, padx=16)
         self.pages, self.navb = {}, {}
         pages = [("servers", "🖥   Мои серверы", "Все сохранённые серверы: что это за сервер, когда был последний бэкап"),
-                 ("backup", "💾   Создать бэкап", "Резервная копия сервера на ваш компьютер"),
+                 ("backup", "💾   Создать бэкап", "Три простых шага: сервер → куда → запуск"),
                  ("restore", "🚀   Восстановление", "Развернуть бэкап на другом сервере — безопасно"),
                  ("sched", "⏰   Расписание", "Автоматические бэкапы в заданное время"),
                  ("cloud", "☁   Облако", "Копия бэкапа в Яндекс Диск или Облако Mail.ru — настраивается один раз")]
@@ -544,29 +544,62 @@ class App(ctk.CTk):
         self.after(400, lambda: self.q.put(("log", f"[i] VPS Backup v{VERSION} готов к работе")))
         self._srv_ui(self.pages["servers"][0])
 
-        # ----- вкладка бэкапа -----
-        self.conn = ConnForm(tb, self, "Сервер"); self.conn.pack(fill="x", padx=12, pady=(0, 8))
-        c = card(tb, "Что сохранить"); c.pack(fill="x", padx=12, pady=(0, 8))
-        g = ctk.CTkFrame(c, fg_color="transparent"); g.pack(fill="x", padx=12, pady=(2, 6))
+        # ----- вкладка бэкапа: пошаговый мастер -----
+        self.step = 0
+        hd = ctk.CTkFrame(tb, fg_color="transparent"); hd.pack(fill="x", padx=12, pady=(0, 8))
+        self.step_lbl = []
+        for i, t in enumerate(("1  Сервер", "2  Куда сохранить", "3  Запуск")):
+            l = ctk.CTkLabel(hd, text=t, height=34, corner_radius=17, font=ctk.CTkFont(FONT, 13, "bold"))
+            l.pack(side="left", padx=(0, 8), ipadx=10); self.step_lbl.append(l)
+        self.steps = [ctk.CTkFrame(tb, fg_color="transparent") for _ in range(3)]
+        # шаг 1 — сервер
+        self.conn = ConnForm(self.steps[0], self, "С какого сервера делать копию"); self.conn.pack(fill="x", padx=12, pady=(0, 8))
+        # шаг 2 — куда
+        c = card(self.steps[1], "Куда сохранить копию"); c.pack(fill="x", padx=12, pady=(0, 8))
+        self.WHERE = {"pc": "💻  На компьютер", "cloud": "☁  Только в облако", "both": "💻 + ☁  И туда, и туда"}
+        self.where = ctk.StringVar(value=self.WHERE["pc"])
+        ctk.CTkSegmentedButton(c, values=list(self.WHERE.values()), variable=self.where, height=40,
+                               selected_color=ACCENT, selected_hover_color=ACCENT_H, font=ctk.CTkFont(FONT, 13),
+                               command=lambda *_: self._where_upd()).pack(anchor="w", padx=16, pady=(4, 8))
+        self.df = ctk.CTkFrame(c, fg_color="transparent")
+        ctk.CTkLabel(self.df, text="Папка на компьютере:", text_color=MUTED).pack(side="left", padx=(0, 8))
+        self.dest = entry(self.df); self.dest.pack(side="left", fill="x", expand=True)
+        btn(self.df, "Обзор", self._pick_dir, primary=False, width=70).pack(side="left", padx=(6, 0))
+        self.where_hint = ctk.CTkLabel(c, text="", justify="left", anchor="w", text_color=TXT, fg_color=SOFT,
+                                       corner_radius=8, wraplength=760)
+        self.where_hint.pack(fill="x", padx=16, pady=(4, 12), ipady=6, ipadx=8)
+        # скрытые флаги, которые читает движок бэкапа
+        self.to_cloud = ctk.BooleanVar(value=False); self.direct = ctk.BooleanVar(value=False); self.save_pc = ctk.BooleanVar(value=True)
+        # дополнительно (свёрнуто)
+        self.adv_btn = btn(self.steps[1], "▸  Дополнительно", self._adv_toggle, primary=False, width=170)
+        self.adv_btn.pack(anchor="w", padx=12, pady=(0, 6))
+        self.adv = card(self.steps[1], "Что сохранять"); 
+        g = ctk.CTkFrame(self.adv, fg_color="transparent"); g.pack(fill="x", padx=12, pady=(2, 6))
         g.columnconfigure((0, 1), weight=1)
         self.opt = {k: ctk.BooleanVar(value=True) for k in ("db", "web", "conf", "pkgs")}
-        for i, (k, t) in enumerate([("db", "🗄  Базы данных (MySQL / PostgreSQL)"), ("web", "🌐  Файлы сайтов (/var/www, /home)"),
-                                    ("conf", "⚙  Настройки служб (nginx, cron…)"), ("pkgs", "📦  Список программ")]):
+        for i, (k, t) in enumerate([("db", "🗄  Базы данных"), ("web", "🌐  Файлы сайтов"),
+                                    ("conf", "⚙  Настройки служб"), ("pkgs", "📦  Список программ")]):
             chk(g, t, self.opt[k]).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=3)
         self.slim = ctk.BooleanVar(value=True)
-        chk(c, "⚡  Без кэша: пропускать node_modules, кэши и логи (архив в разы меньше)", self.slim).pack(anchor="w", padx=16, pady=(0, 6))
-        df = ctk.CTkFrame(c, fg_color="transparent"); df.pack(fill="x", padx=14, pady=(0, 6))
-        ctk.CTkLabel(df, text="Папка:", text_color=MUTED).pack(side="left", padx=(0, 8))
-        self.dest = entry(df); self.dest.pack(side="left", fill="x", expand=True)
-        btn(df, "Обзор", self._pick_dir, primary=False, width=70).pack(side="left", padx=(6, 0))
-        self.to_cloud = ctk.BooleanVar(value=False)
-        chk(c, "☁  Дублировать в облако (настройка — в разделе «Облако»)", self.to_cloud).pack(anchor="w", padx=16, pady=(0, 10))
-        b = ctk.CTkFrame(tb, fg_color="transparent"); b.pack(fill="x", padx=12, pady=(0, 8))
-        self.start = btn(b, "▶  Начать бэкап", self.run, width=180); self.start.pack(side="left")
-        self.openb = btn(b, "📂  Открыть папку с бэкапами", self.open_dir, primary=False, state="disabled")
-        self.openb.pack(side="left", padx=8)
+        chk(self.adv, "⚡  Не сохранять кэш и логи (архив в разы меньше)", self.slim).pack(anchor="w", padx=16, pady=(0, 6))
         self.poweroff = ctk.BooleanVar(value=False)
-        chk(tb, "⏻  Выключить компьютер после успешного бэкапа", self.poweroff).pack(anchor="w", padx=16, pady=(0, 8))
+        chk(self.adv, "⏻  Выключить компьютер, когда всё будет готово", self.poweroff).pack(anchor="w", padx=16, pady=(0, 10))
+        # шаг 3 — запуск
+        c3 = card(self.steps[2], "Всё готово"); c3.pack(fill="x", padx=12, pady=(0, 8))
+        self.summary = ctk.CTkLabel(c3, text="", justify="left", anchor="w", text_color=TXT, font=ctk.CTkFont(FONT, 14))
+        self.summary.pack(fill="x", padx=16, pady=(4, 10))
+        b = ctk.CTkFrame(c3, fg_color="transparent"); b.pack(fill="x", padx=16, pady=(0, 14))
+        self.start = ctk.CTkButton(b, text="▶  Сделать копию", command=self.run, height=48, width=240, corner_radius=10,
+                                   fg_color=ACCENT, hover_color=ACCENT_H, text_color="#FFFFFF", font=ctk.CTkFont(FONT, 16, "bold"))
+        self.start.pack(side="left")
+        self.openb = btn(b, "📂  Открыть папку с копиями", self.open_dir, primary=False, state="disabled")
+        self.openb.pack(side="left", padx=10)
+        # навигация
+        nv = ctk.CTkFrame(tb, fg_color="transparent"); nv.pack(fill="x", padx=12, pady=(0, 8), side="bottom")
+        self.backb = btn(nv, "←  Назад", lambda: self._go(self.step - 1), primary=False, width=110)
+        self.nextb = btn(nv, "Далее  →", lambda: self._go(self.step + 1), width=130)
+        self._nav = nv
+        self._go(0)
 
         # ----- вкладка восстановления -----
         af = card(tr, "Файл бэкапа"); af.pack(fill="x", padx=12, pady=(0, 8))
@@ -603,7 +636,6 @@ class App(ctk.CTk):
                                    font=ctk.CTkFont(FONT, 13, "bold"))
         self.stopb.pack(side="left")
         self.remember = ctk.BooleanVar(value=True)
-        chk(top, "Запоминать настройки", self.remember).pack(side="left", padx=12)
         self.status = ctk.CTkLabel(top, text="Готов к работе", text_color=MUTED); self.status.pack(side="right")
         self.cbadge = ctk.CTkLabel(top, text="", height=26, corner_radius=13, font=ctk.CTkFont(FONT, 12, "bold"))
         self._cb_state = None; self._cb_tick = 0
@@ -674,6 +706,7 @@ class App(ctk.CTk):
     def _srv_use(self, n, where):
         f = self.conn if where == "backup" else self.rconn
         f.prof.set(n); f.load(self.servers.get(n, {})); self.show(where)
+        if where == "backup": self._go(1)
 
     def _srv_del(self, n):
         self.conn.prof.set(n); self.conn._del_profile()
@@ -833,15 +866,6 @@ class App(ctk.CTk):
         gr2 = ctk.CTkFrame(self.g_row, fg_color="transparent"); gr2.pack(fill="x", padx=16, pady=4)
         btn(gr2, "💾  Сохранить коды Google", self._google_creds_save, primary=False).pack(side="left")
         self.g_stat = ctk.CTkLabel(gr2, text="", text_color=MUTED); self.g_stat.pack(side="left", padx=8)
-        self.direct = ctk.BooleanVar(value=False); self.save_pc = ctk.BooleanVar(value=True)
-        dr = ctk.CTkFrame(c, fg_color=SOFT, corner_radius=8); dr.pack(fill="x", padx=16, pady=(8, 4))
-        dc = chk(dr, "🚀  Отправлять в облако напрямую с сервера (минуя компьютер) — Mail.ru и Яндекс Диск", self.direct)
-        dc.configure(command=self._direct_toggle); dc.pack(anchor="w", padx=10, pady=(8, 2))
-        self.save_pc_chk = chk(dr, "💻  Также сохранять копию на этот компьютер", self.save_pc)
-        self.save_pc_chk.pack(anchor="w", padx=34, pady=(2, 2))
-        ctk.CTkLabel(dr, text="Сервер сам упакует архив и загрузит его в облако на своей скорости, затем удалит временный файл. "
-                     "Нужно свободное место на диске сервера размером с архив.", text_color=MUTED, wraplength=760,
-                     justify="left").pack(anchor="w", padx=10, pady=(0, 8))
         self.c_hint = ctk.CTkLabel(c, text="", justify="left", anchor="w", text_color=TXT, fg_color=SOFT,
                                    corner_radius=8, wraplength=780)
         self.c_hint.pack(fill="x", padx=16, pady=8, ipady=8, ipadx=8)
@@ -853,8 +877,61 @@ class App(ctk.CTk):
         self.c_stat = ctk.CTkLabel(b, text="", text_color=MUTED); self.c_stat.pack(side="left", padx=8)
         self._cloud_hint()
 
-    def _direct_toggle(self):
-        self.save_pc_chk.configure(state="normal" if self.direct.get() else "disabled")
+    def _direct_toggle(self): self._where_upd()
+
+    # ----- мастер бэкапа -----
+    def _go(self, i):
+        i = max(0, min(2, i))
+        if i > 0 and not self.conn.host.get().strip():
+            return messagebox.showinfo("VPS Backup", "Сначала выберите сервер или впишите его адрес (IP).")
+        if not self._where_upd(check=(i == 2)): return
+        self.step = i
+        for k, f in enumerate(self.steps):
+            f.pack_forget()
+            self.step_lbl[k].configure(fg_color=ACCENT if k == i else (SOFT_H if k < i else SOFT),
+                                       text_color="#FFFFFF" if k == i else (TXT if k < i else MUTED))
+        self.steps[i].pack(fill="x", before=self._nav)
+        self.backb.pack_forget(); self.nextb.pack_forget()
+        if i > 0: self.backb.pack(side="left")
+        if i < 2: self.nextb.pack(side="right")
+        if i == 2: self._summary()
+
+    def _adv_toggle(self):
+        if self.adv.winfo_ismapped():
+            self.adv.pack_forget(); self.adv_btn.configure(text="▸  Дополнительно")
+        else:
+            self.adv.pack(fill="x", padx=12, pady=(0, 8)); self.adv_btn.configure(text="▾  Дополнительно")
+
+    def _where_key(self):
+        return {v: k for k, v in self.WHERE.items()}.get(self.where.get(), "pc")
+
+    def _where_upd(self, check=False):
+        """Переводит выбор «куда» в флаги движка и показывает подсказку. check=True — проверить перед запуском."""
+        w = self._where_key(); cc = getattr(self, "cloudcfg", {}) or {}
+        prov = cc.get("provider") or ""; ready = bool(cc.get("login")) and prov in cloud.PROVIDERS
+        pname = cloud.PROVIDERS.get(prov, "облако")
+        if w == "pc": self.df.pack(fill="x", padx=16, pady=(0, 6), before=self.where_hint)
+        else: self.df.pack_forget() if w == "cloud" else self.df.pack(fill="x", padx=16, pady=(0, 6), before=self.where_hint)
+        self.to_cloud.set(w == "both"); self.direct.set(w == "cloud"); self.save_pc.set(w != "cloud")
+        if w == "pc": t = "Копия будет сохранена в папку на этом компьютере."
+        elif not ready: t = "⚠ Облако ещё не подключено. Откройте раздел «☁ Облако» слева и войдите — это делается один раз."
+        elif w == "cloud" and prov == "google":
+            t = "⚠ Google Диск поддерживает только вариант «И туда, и туда»."
+        elif w == "cloud": t = f"Сервер сам отправит копию в {pname}, компьютер и ваш интернет не нужны."
+        else: t = f"Копия сохранится на компьютер и сразу отправится в {pname}."
+        self.where_hint.configure(text=t)
+        if check and w != "pc" and (not ready or (w == "cloud" and prov == "google")):
+            messagebox.showinfo("VPS Backup", t.lstrip("⚠ ")); return False
+        return True
+
+    def _summary(self):
+        n = self.conn.label() or "сервер"; w = self._where_key()
+        where = {"pc": f"в папку {self.dest.get()}", "cloud": "в облако (напрямую с сервера)",
+                 "both": f"в папку {self.dest.get()} и в облако"}[w]
+        what = [t for k, t in (("db", "базы данных"), ("web", "файлы сайтов"), ("conf", "настройки"), ("pkgs", "список программ"))
+                if self.opt[k].get()]
+        self.summary.configure(text=f"🖥  Сервер: {n}\n📁  Куда: {where}\n📦  Что: {', '.join(what) or '—'}"
+                               + ("\n⏻  После — выключить компьютер" if self.poweroff.get() else ""))
 
     def _cloud_key(self):
         return {v: k for k, v in cloud.PROVIDERS.items()}.get(self.c_prov.get(), "yandex")
@@ -1156,7 +1233,7 @@ class App(ctk.CTk):
         data.update(dest=self.dest.get(), opt={k: v.get() for k, v in self.opt.items()}, restore=self.rconn.dump(),
                     servers=self.servers, schedule=self.sched, cloud=getattr(self, "cloudcfg", {}) or {},
                     to_cloud=self.to_cloud.get(), slim=self.slim.get(), poweroff=self.poweroff.get(),
-                    direct=self.direct.get(), save_pc=self.save_pc.get())
+                    direct=self.direct.get(), save_pc=self.save_pc.get(), where=self._where_key())
         CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self):
@@ -1174,6 +1251,8 @@ class App(ctk.CTk):
             if k in self.opt: self.opt[k].set(v)
         if "slim" in d: self.slim.set(bool(d["slim"]))
         self.poweroff.set(bool(d.get("poweroff")))
+        w = d.get("where") or ("cloud" if d.get("direct") and not d.get("save_pc", True) else "both" if d.get("to_cloud") or d.get("direct") else "pc")
+        self.where.set(self.WHERE.get(w, self.WHERE["pc"])); self._where_upd()
         self._sched_load(d)
 
     # ---------- общее ----------
