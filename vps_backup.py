@@ -1,12 +1,12 @@
 """VPS Backup — GUI-приложение для резервного копирования VPS на локальный ПК."""
-import gzip, json, os, re, socket, queue, shlex, shutil, tarfile, threading, time, subprocess, sys
+import gzip, json, os, re, socket, queue, shlex, shutil, tarfile, threading, time, subprocess, sys, urllib.parse
 from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import paramiko
 import cloud
 
-VERSION = "4.12"
+VERSION = "4.13"
 RCLONE_URL = {"mailru": "https://webdav.cloud.mail.ru", "yandex": "https://webdav.yandex.ru"}
 RCLONE_INSTALL = ("command -v rclone >/dev/null 2>&1 && { echo \"rclone уже установлен\"; exit 0; }; "
     "echo \"Устанавливаю rclone...\"; (command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || dnf install -y unzip >/dev/null 2>&1); "
@@ -605,6 +605,8 @@ class App(ctk.CTk):
         self.remember = ctk.BooleanVar(value=True)
         chk(top, "Запоминать настройки", self.remember).pack(side="left", padx=12)
         self.status = ctk.CTkLabel(top, text="Готов к работе", text_color=MUTED); self.status.pack(side="right")
+        self.cbadge = ctk.CTkLabel(top, text="", height=26, corner_radius=13, font=ctk.CTkFont(FONT, 12, "bold"))
+        self._cb_state = None; self._cb_tick = 0
         self.bar = ctk.CTkProgressBar(bot, height=6, corner_radius=3, progress_color=ACCENT, fg_color=SOFT)
         self.bar.pack(fill="x", padx=12, pady=4); self.bar.set(0)
         self.log = ctk.CTkTextbox(bot, height=110, font=("Cascadia Mono", 12), fg_color="#FAFBFE", text_color=TXT,
@@ -845,6 +847,7 @@ class App(ctk.CTk):
         self.c_hint.pack(fill="x", padx=16, pady=8, ipady=8, ipadx=8)
         b = ctk.CTkFrame(c, fg_color="transparent"); b.pack(fill="x", padx=16, pady=(0, 14))
         self.g_btn = btn(b, "🔑  Войти через Google", self._google_login, width=200)
+        self.w_btn = btn(b, "🌐  Войти через браузер", self._web_login, width=200)
         btn(b, "🔌  Проверить подключение", self._cloud_test, width=220).pack(side="left")
         btn(b, "💾  Сохранить", self._cloud_save, primary=False).pack(side="left", padx=8)
         self.c_stat = ctk.CTkLabel(b, text="", text_color=MUTED); self.c_stat.pack(side="left", padx=8)
@@ -875,11 +878,48 @@ class App(ctk.CTk):
                 self.after(0, lambda: self.c_stat.configure(text=f"✗ {t}", text_color=ERR))
         threading.Thread(target=job, daemon=True).start()
 
+    PW_PAGES = {"mailru": "https://account.mail.ru/user/2-step-auth/passwords/",
+                "yandex": "https://id.yandex.ru/security/app-passwords"}
+
+    def _web_login(self):
+        """Открывает в браузере страницу паролей приложений и сам ловит скопированный пароль."""
+        import webbrowser
+        prov = self._cloud_key(); name = cloud.PROVIDERS[prov]
+        if not self.c_login.get().strip():
+            d = ctk.CTkInputDialog(title=name, text=f"Ваша почта {name} (например, ivan@mail.ru):")
+            v = (d.get_input() or "").strip()
+            if not v: return
+            self.c_login.insert(0, v)
+        try: self._clip0 = self.clipboard_get()
+        except Exception: self._clip0 = ""
+        webbrowser.open(self.PW_PAGES[prov])
+        messagebox.showinfo(name, "Открыл страницу в браузере. Войдите в свою почту, если попросит.\n\n"
+                            "1. Нажмите «Добавить» (создать пароль), имя — «VPS Backup».\n"
+                            + ("2. Доступ — «Полный доступ к Почте, Облаку и Календарю».\n" if prov == "mailru" else "2. Тип — «Файлы (WebDAV)».\n")
+                            + "3. Нажмите «Скопировать» рядом с готовым паролем.\n\n"
+                            "Программа сама заметит скопированный пароль и проверит вход.")
+        self.c_stat.configure(text="Жду, когда вы скопируете пароль в браузере...", text_color=MUTED)
+        self._clip_wait(180)
+
+    def _clip_wait(self, left):
+        try: v = self.clipboard_get().strip()
+        except Exception: v = ""
+        if v and v != self._clip0 and re.fullmatch(r"[A-Za-z0-9]{12,32}", v.replace(" ", "")):
+            self.c_pwd.configure(state="normal"); self.c_pwd.delete(0, "end"); self.c_pwd.insert(0, v.replace(" ", ""))
+            self.c_stat.configure(text="✓ Пароль получен, проверяю вход...", text_color=OK)
+            self._cloud_save(quiet=True); self._cloud_test(); return
+        if left <= 0:
+            self.c_stat.configure(text="Не дождался пароля — вставьте его в поле вручную", text_color=WARN); return
+        self.after(1000, lambda: self._clip_wait(left - 1))
+
     def _cloud_hint(self):
         g = self._cloud_key() == "google"
         if hasattr(self, "g_btn"):
             if g: self.g_btn.pack(side="left", padx=(0, 8), before=self.g_btn.master.winfo_children()[1])
             else: self.g_btn.pack_forget()
+        if hasattr(self, "w_btn"):
+            if not g: self.w_btn.pack(side="left", padx=(0, 8), before=self.w_btn.master.winfo_children()[2])
+            else: self.w_btn.pack_forget()
         if hasattr(self, "g_row"):
             if g: self.g_row.pack(fill="x", before=self.c_hint)
             else: self.g_row.pack_forget()
@@ -986,13 +1026,18 @@ class App(ctk.CTk):
         pwd = self._cloud_pwd(cc) if cc.get("login") else ""
         if not cc.get("login") or not pwd:
             L("[!] Облако не настроено — копия осталась только на компьютере (раздел «Облако»)"); return
+        prov = cloud.PROVIDERS.get(cc.get("provider"), "облако")
+        self.q.put(("cloud", ("run", f"Загрузка в {prov}")))
         def cb(done, total):
+            self.q.put(("cloud", ("run", f"Загрузка в {prov}: {int(done*100/total) if total else 100}%")))
             self.q.put(("bar", done / total if total else 1))
             self.q.put(("status", f"Облако: {done/1048576:.0f} из {total/1048576:.0f} МБ"))
         try:
             cloud.send_backup(cc["provider"], cc["login"], pwd, cc.get("folder", "/VPS_Backups"), str(path),
                               f"vps_backup_{safe_name(server)}_", int(cc.get("keep", 5)), L, cb, self.cancel)
+            self.q.put(("cloud", ("ok", f"{prov}: загружено, всё в порядке")))
         except Exception as e:
+            self.q.put(("cloud", ("err", f"{prov}: не загружено")))
             msg = e if isinstance(e, cloud.CloudError) else net_msg(e)
             L(f"[!] Не удалось отправить в облако: {msg}. Копия на компьютере сохранена.")
 
@@ -1316,7 +1361,7 @@ class App(ctk.CTk):
         ssh = None; tmp = final = None; retry = False
         try:
             Path(c["dest"]).mkdir(parents=True, exist_ok=True)
-            ssh = connect(c, L); self.q.put(("bar", 0.05))
+            self.q.put(("cloud", (None,))); ssh = connect(c, L); self.q.put(("bar", 0.05))
             _, o, _ = ssh.exec_command("hostname"); hn = o.read().decode().strip() or c["host"]
             name = f"vps_backup_{safe_name(c.get('name') or hn)}_{time.strftime('%Y-%m-%d_%H-%M')}"
             final = Path(c["dest"]) / (name + ".tar.gz"); n = 2
@@ -1482,12 +1527,20 @@ class App(ctk.CTk):
             with sftp.open(f"{W}/.pw", "w") as f: f.write(pwd)
             sftp.chmod(f"{W}/.pw", 0o600)
             L("[*] Проверяю программу выгрузки (rclone) на сервере...")
-            if self._run_log(ssh, RCLONE_INSTALL) != 0 or self._exec(ssh, "command -v rclone")[1] != 0:
-                raise Exception("не удалось установить rclone на сервер (нужен доступ в интернет и права root)")
+            use_curl = self._run_log(ssh, RCLONE_INSTALL) != 0 or self._exec(ssh, "command -v rclone")[1] != 0
+            NR = q(W + '/.netrc'); base = RCLONE_URL[prov].rstrip('/')
+            if use_curl:
+                if self._exec(ssh, "command -v curl")[1] != 0:
+                    raise Exception("на сервере нет ни rclone, ни curl — выгрузка невозможна")
+                L("[i] rclone не установился — использую простой способ: curl (ничего ставить не нужно)")
+                host = base.split('//', 1)[1].split('/')[0]
+                nr = (f"P=$(cat {q(W + '/.pw')}); rm -f {q(W + '/.pw')}; umask 077; "
+                      f"printf 'machine %s login %s password %s\\n' {q(host)} {q(cc['login'])} \"$P\" > {NR}")
+                if self._exec(ssh, nr)[1] != 0: raise Exception("не удалось подготовить вход в облако")
             conf = (f"P=$(rclone obscure - < {q(W + '/.pw')}); rm -f {q(W + '/.pw')}; "
                     f"printf '[r]\\ntype = webdav\\nurl = %s\\nvendor = other\\nuser = %s\\npass = %s\\n' "
                     f"{q(RCLONE_URL[prov])} {q(cc['login'])} \"$P\" > {q(W + '/rc.conf')}; chmod 600 {q(W + '/rc.conf')}")
-            if self._exec(ssh, conf)[1] != 0: raise Exception("не удалось настроить rclone")
+            if not use_curl and self._exec(ssh, conf)[1] != 0: raise Exception("не удалось настроить rclone")
             o = c["opt"]
             if o["db"]:
                 for fn, cmd, lab in (("mysql_all.sql.gz", MYSQL_CMD, "MySQL"), ("postgres_all.sql.gz", PG_CMD, "PostgreSQL")):
@@ -1526,14 +1579,31 @@ class App(ctk.CTk):
             L(f"[✓] Архив на сервере готов и проверен: {name}.tar.gz ({human(size)})")
             L(f"[*] Загрузка с сервера в {cloud.PROVIDERS[prov]}: {folder}/{name}.tar.gz")
             self.q.put(("status", "Сервер загружает архив в облако...")); self.q.put(("bar", 0.7))
-            code = self._run_log(ssh, f"{RC} mkdir {q('r:' + folder)} 2>/dev/null; {RC} copyto {q(A)} {q(dst)} "
-                                 "--retries 5 --low-level-retries 20 --stats 10s --stats-one-line -v 2>&1 | grep -v DEBUG; exit ${PIPESTATUS[0]}")
-            if code != 0: raise Exception("загрузка в облако не удалась (см. строки rclone выше)")
-            rs = self._exec(ssh, f"{RC} size --json {q(dst)}")[0]
-            try:
-                if json.loads(rs).get("bytes") != size: raise Broken("в облаке размер файла не совпал с архивом — загрузите заново")
-            except ValueError: pass
-            L(f"[✓] В облаке: {folder}/{name}.tar.gz ({human(size)}) — размер сверен")
+            self.q.put(("cloud", ("run", f"Сервер → {cloud.PROVIDERS[prov]}")))
+            up_ok = False
+            if use_curl:
+                CU = f"curl -sS --netrc-file {NR} --retry 5 --retry-delay 10"
+                url = base + "/" + "/".join(urllib.parse.quote(p) for p in folder.strip("/").split("/")) + "/"
+                self._exec(ssh, f"{CU} -X MKCOL {q(url)} -o /dev/null")
+                code = self._run_log(ssh, f"{CU} -f -T {q(A)} {q(url + name + '.tar.gz')} -o /dev/null -w 'HTTP %{{http_code}}\\n'")
+                if code != 0: raise Exception("загрузка в облако через curl не удалась (на бесплатном тарифе Mail.ru файл не больше 2 ГБ)")
+                rs = self._exec(ssh, f"{CU} -fI {q(url + name + '.tar.gz')} | tr -d '\\r' | awk 'tolower($1)==\"content-length:\"{{print $2}}'")[0].strip()
+                if rs.isdigit() and int(rs) != size: raise Broken("в облаке размер файла не совпал с архивом — загрузите заново")
+                L(f"[✓] В облаке: {folder}/{name}.tar.gz ({human(size)})")
+                L("[i] В режиме curl старые копии в облаке не удаляются автоматически")
+                up_ok = True
+                cc["keep"] = 0
+            else:
+              code = self._run_log(ssh, f"{RC} mkdir {q('r:' + folder)} 2>/dev/null; {RC} copyto {q(A)} {q(dst)} "
+                                   "--retries 5 --low-level-retries 20 --stats 10s --stats-one-line -v 2>&1 | grep -v DEBUG; exit ${PIPESTATUS[0]}")
+              if code != 0: raise Exception("загрузка в облако не удалась (см. строки rclone выше)")
+              rs = self._exec(ssh, f"{RC} size --json {q(dst)}")[0]
+              try:
+                  if json.loads(rs).get("bytes") != size: raise Broken("в облаке размер файла не совпал с архивом — загрузите заново")
+              except ValueError: pass
+              L(f"[✓] В облаке: {folder}/{name}.tar.gz ({human(size)}) — размер сверен")
+              up_ok = True
+            self.q.put(("cloud", ("ok", f"{cloud.PROVIDERS[prov]}: загружено, всё в порядке")))
             ck = int(cc.get("keep", 5) or 0)
             if ck:
                 pre = f"vps_backup_{safe_name(srv)}_"
@@ -1561,6 +1631,7 @@ class App(ctk.CTk):
             else:
                 L("[i] Копия на компьютер не сохранялась (так выбрано в разделе «Облако»)")
         finally:
+            if locals().get("up_ok") is False: self.q.put(("cloud", ("err", f"{cloud.PROVIDERS[prov]}: не загружено")))
             try: self._exec(ssh, f"rm -rf {q(W)}"); L("[i] Временные файлы на сервере удалены")
             except Exception: pass
 
@@ -1786,6 +1857,22 @@ class App(ctk.CTk):
         btn(w, "Отменить выключение", cancel, width=220).pack(padx=30, pady=(0, 24))
         w.protocol("WM_DELETE_WINDOW", cancel); tick()
 
+    def _cloud_badge(self, state, text=""):
+        """Значок облака: run — идёт загрузка (мигает), ok — готово, err — ошибка, None — скрыт."""
+        self._cb_state = state
+        if state is None: self.cbadge.pack_forget(); return
+        col = {"run": ACCENT, "ok": OK, "err": ERR}[state]
+        icon = {"run": "☁ ⇡", "ok": "☁ ✓", "err": "☁ ✗"}[state]
+        self.cbadge.configure(text=f"  {icon}  {text}  ", fg_color=col, text_color="#FFFFFF")
+        self.cbadge.pack(side="right", padx=8)
+        if state == "run": self._cb_text = text; self._cb_anim()
+
+    def _cb_anim(self):
+        if self._cb_state != "run": return
+        self._cb_tick = (self._cb_tick + 1) % 4
+        self.cbadge.configure(text=f"  ☁ ⇡  {self._cb_text}{'.' * self._cb_tick}{' ' * (3 - self._cb_tick)}  ")
+        self.after(500, self._cb_anim)
+
     def _poll(self):
         try:
             while True:
@@ -1796,6 +1883,7 @@ class App(ctk.CTk):
                 elif k == "bar": self.bar.set(v)
                 elif k == "ask": self._ask_dialog(v)
                 elif k == "status": self.status.configure(text=v)
+                elif k == "cloud": self._cloud_badge(*v)
                 elif k == "done":
                     kind, ok = v
                     if kind == "backup" and ok is not True: self._all_ok = False
