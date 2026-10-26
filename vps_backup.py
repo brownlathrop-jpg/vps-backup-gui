@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox
 import paramiko
 import cloud
 
-VERSION = "4.15"
+VERSION = "4.16"
 RCLONE_URL = {"mailru": "https://webdav.cloud.mail.ru", "yandex": "https://webdav.yandex.ru"}
 RCLONE_INSTALL = ("command -v rclone >/dev/null 2>&1 && { echo \"rclone уже установлен\"; exit 0; }; "
     "echo \"Устанавливаю rclone...\"; (command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || dnf install -y unzip >/dev/null 2>&1); "
@@ -1674,7 +1674,7 @@ class App(ctk.CTk):
                 cc["keep"] = 0
             else:
               code = self._run_log(ssh, f"{RC} mkdir {q('r:' + folder)} 2>/dev/null; {RC} copyto {q(A)} {q(dst)} "
-                                   "--retries 5 --low-level-retries 20 --stats 10s --stats-one-line -v 2>&1 | grep -v DEBUG; exit ${PIPESTATUS[0]}")
+                                   "--retries 5 --low-level-retries 20 --stats 10s --stats-one-line -v 2>&1 | grep -v DEBUG; exit ${PIPESTATUS[0]}", progress=True)
               if code != 0: raise Exception("загрузка в облако не удалась (см. строки rclone выше)")
               rs = self._exec(ssh, f"{RC} size --json {q(dst)}")[0]
               try:
@@ -1759,8 +1759,9 @@ class App(ctk.CTk):
         drain(); code = ch.recv_exit_status(); self.chan = None; ch.close()
         return code, out.decode("utf-8", "replace").strip()
 
-    def _run_log(self, ssh, cmd):
-        """Выполняет долгую команду и транслирует её вывод в лог построчно."""
+    def _run_log(self, ssh, cmd, progress=False):
+        """Выполняет долгую команду и транслирует её вывод в лог построчно.
+        progress=True: строки прогресса (rclone) не пишутся в лог, а обновляют полосу и статус."""
         ch = ssh.get_transport().open_session(); self.chan = ch
         ch.get_pty(); ch.exec_command("bash -c " + shlex.quote(cmd))
         buf = b""
@@ -1771,11 +1772,32 @@ class App(ctk.CTk):
                 *lines, buf = buf.replace(b"\r", b"\n").split(b"\n")
                 for l in lines:
                     t = l.decode("utf-8", "replace").strip()
-                    if t: self.q.put(("log", "    " + t[:200]))
+                    if not t: continue
+                    if progress and self._prog_line(t): continue
+                    self.q.put(("log", "    " + t[:200]))
             elif ch.exit_status_ready(): break
             else: time.sleep(0.1)
         code = ch.recv_exit_status(); self.chan = None; ch.close()
         return code
+
+    def _prog_line(self, t):
+        """Обрабатывает строку прогресса выгрузки: обновляет полосу и статусную строку.
+        Возвращает True, если строка — это прогресс (в лог её не писать)."""
+        if "Transferred:" not in t and "%" not in t and "ETA" not in t: return False
+        m = re.search(r"(\d+(?:[.,]\d+)?)%", t)
+        if not m:
+            if "Transferred:" in t or "ETA" in t: return True
+            return False
+        try: pct = min(100.0, max(0.0, float(m.group(1).replace(",", "."))))
+        except ValueError: return True
+        ms = re.search(r"([\d.,]+\s*[KMG]?i?B/s)", t); sp = ms.group(1) if ms else ""
+        me = re.search(r"ETA\s+(\S+)", t); eta = me.group(1) if me else ""
+        self.q.put(("bar", 0.7 + 0.25 * pct / 100.0))
+        bits = [f"{int(pct)}%"]
+        if sp: bits.append("скорость " + sp.replace("iB/s", "Б/с"))
+        if eta and eta != "--": bits.append("осталось " + eta)
+        self.q.put(("status", "Сервер → облако: " + ", ".join(bits)))
+        return True
 
     def _rworker(self, c):
         L = lambda m: self.q.put(("log", m))
